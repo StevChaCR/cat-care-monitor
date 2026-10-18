@@ -5,10 +5,11 @@
   const token = document.querySelector('meta[name="catcare-engine"]').content;
   const local = ['127.0.0.1', 'localhost'].includes(location.hostname) &&
     token.length > 25 && token !== '__ENGINE_TOKEN__';
+  const trainingMode = local && document.querySelector('meta[name="catcare-training"]')?.content === 'true';
   const state = { status: null, configLoaded: false, zones: {}, frame: null,
     images: [], sessions: [], galleryUrls: [], label: null, labelImage: null, boxes: [],
     drawing: null, cameraBusy: false, frameBusy: false, libraryBusy: false };
-  const names = { overview: 'Overview', camera: 'Camera & zones', library: 'Cat library', training: 'Personalize detection' };
+  const names = { overview: 'Overview', camera: 'Camera & zones', library: 'Cat library', training: 'Train detection', behavior: 'Behavior lab' };
   const stationNames = { litter_box: 'Litter box', food: 'Food', water: 'Water' };
   const colors = { litter_box: '#9b7fc1', food: '#d0a45a', water: '#65a3bb' };
   let toastTimeout;
@@ -42,7 +43,8 @@
   }
 
   function navigate() {
-    const page = location.hash.slice(1) in names ? location.hash.slice(1) : 'overview';
+    let page = location.hash.slice(1) in names ? location.hash.slice(1) : 'overview';
+    if (!trainingMode && ['library', 'training', 'behavior'].includes(page)) page = 'overview';
     document.querySelectorAll('[data-view]').forEach(view => { view.hidden = view.dataset.view !== page; });
     document.querySelectorAll('[data-page]').forEach(link => {
       link.classList.toggle('active', link.dataset.page === page);
@@ -51,11 +53,14 @@
     });
     $('page-name').textContent = names[page];
     if (page === 'library' && local) action(refreshLibrary);
+    if (page === 'behavior' && trainingMode) action(refreshBehaviorLibrary);
     if (page === 'camera') drawCamera();
   }
   addEventListener('hashchange', navigate);
   $('setup-toggle').onclick = () => { $('setup-guide').hidden = !$('setup-guide').hidden; };
   document.querySelectorAll('[data-local]').forEach(element => { element.disabled = !local; });
+  document.querySelectorAll('[data-training]').forEach(element => { if (!trainingMode) element.hidden = true; });
+  document.querySelectorAll('[data-consumer]').forEach(element => { element.hidden = trainingMode; });
   if (local) {
     $('engine-banner').hidden = true;
     $('engine-chip').classList.add('connected');
@@ -96,7 +101,7 @@
       $('diagnostic-detail').textContent = `${row.error.code} · ${row.error.stage}\n${row.error.detail}`;
     }
     $('camera-fps').textContent = `Camera ${(row.video_fps || 0).toFixed(1)} FPS · AI ${(row.ai_fps || 0).toFixed(1)} FPS${row.processor ? ` · ${row.processor}` : ''}`;
-    const busy = ['preparing', 'training', 'evaluating'].includes(row.training.phase);
+    const busy = [row.training, row.behavior_training].some(job => ['preparing', 'training', 'evaluating'].includes(job?.phase));
     $('connect-button').disabled = !local || active || busy || state.cameraBusy;
     $('disconnect-button').disabled = !local || !active || state.cameraBusy;
     $('save-zones').disabled = !local || active || !state.frame;
@@ -114,6 +119,7 @@
       `${(summary.observed_seconds / 3600).toFixed(2)} of 24 hours observed · missing detections may affect measurements` :
       'Connect a camera and select zones to begin recording.';
     renderTraining(row.training);
+    renderBehavior(row);
     drawCamera();
   }
 
@@ -427,7 +433,7 @@
       'Review all images from at least 3 independent recording sessions to begin.');
     $('training-epoch').textContent = job.epoch ? `Epoch ${job.epoch} / ${job.epochs}` : '—';
     $('training-progress').style.width = `${phase === 'completed' ? 100 : Math.min(95, 95 * (job.epoch || 0) / (job.epochs || 60))}%`;
-    $('train-button').disabled = !local || busy || !!state.status?.running;
+    $('train-button').disabled = !local || busy || !!state.status?.running || ['preparing', 'training', 'evaluating'].includes(state.status?.behavior_training?.phase);
     $('cancel-training').disabled = !local || !busy;
     $('activate-model').hidden = phase !== 'completed';
     $('activate-model').disabled = !local || phase !== 'completed' || !!state.status?.running;
@@ -458,7 +464,186 @@
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'cat-care-visits.csv';
     anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
-  addEventListener('beforeunload', () => { revokeGallery(); state.frame?.close(); state.labelImage?.close(); });
+  const behavior = { clips: [], sessions: [], urls: [], busy: false, clip: null, frames: [],
+    index: 0, playing: false, timer: null, generation: 0, captured: -1, saving: false };
+  const activityNames = { eating: 'Eating', drinking: 'Drinking', other: 'Other', exclude: 'Cannot tell' };
+
+  function renderBehavior(row) {
+    const status = row.behavior || {};
+    const job = row.behavior_training || { phase: 'idle' };
+    const busy = ['preparing', 'training', 'evaluating'].includes(job.phase);
+    const detectorBusy = ['preparing', 'training', 'evaluating'].includes(row.training?.phase);
+    const labels = { waiting: 'Waiting for a sequence', candidate: 'Checking activity', away: 'Away from station',
+      other: 'Nearby · other activity', uncertain: 'Unclear · time paused',
+      probable_eating: 'Probably eating', probable_drinking: 'Probably drinking' };
+    $('activity-message').textContent = !row.activity_model_available ?
+      'Eating and drinking recognition is not available in this version. Station visits remain available.' :
+      status.phase === 'error' ? `Activity recognition paused: ${status.error || 'Could not load the activity model.'}` :
+      status.phase === 'loading' ? 'Preparing activity recognition…' :
+      row.running ? 'Experimental activity estimates · only observed activity time is accumulated.' :
+      'Connect your camera to observe activity. Previous records remain saved.';
+    for (const station of ['food', 'water']) {
+      const metric = status.summary?.[station];
+      const available = row.activity_model_available && metric && row.config.zones[station];
+      $(`activity-${station}-count`).textContent = available ? metric.sessions : '—';
+      $(`activity-${station}-time`).textContent = available ? `${(metric.observed_seconds / 60).toFixed(1)} observed min · ${metric.incomplete} incomplete` : 'No activity observations';
+      $(`activity-${station}-state`).textContent = !row.activity_model_available ? 'Not available' :
+        !row.config.zones[station] ? 'Zone not configured' : !row.running ? 'Camera disconnected' : labels[status.stations?.[station]] || 'Waiting';
+    }
+    $('activity-export').disabled = !local || !status.summary;
+    if (!trainingMode) return;
+    $('behavior-collect').disabled = !row.running || busy || detectorBusy;
+    $('behavior-collect').textContent = status.collecting ? 'Stop collecting clips' : 'Collect behavior clips';
+    $('behavior-collection-note').textContent = `${status.captured || 0} clips saved this camera run. ${status.note || 'Captures cropped station sequences, including empty scenes. Review every clip.'}`;
+    $('behavior-phase').textContent = job.phase === 'idle' ? 'Not started' : job.phase;
+    $('behavior-training-message').textContent = job.message || (job.phase === 'completed' ?
+      'Review test clips and validate complete unseen recordings before including this candidate in a release.' :
+      busy ? 'Training locally. Keep the engine running.' : 'Review clips from at least 3 independent periods, including all activities and Other examples at both stations.');
+    $('behavior-epoch').textContent = job.epoch ? `Epoch ${job.epoch} / ${job.epochs}` : job.prepared ? `Preparing ${job.prepared} / ${job.total} clips` : '—';
+    $('behavior-progress').style.width = `${job.phase === 'completed' ? 100 : job.phase === 'preparing' ? 10 * (job.prepared || 0) / (job.total || 1) : 10 + 85 * (job.epoch || 0) / (job.epochs || 60)}%`;
+    $('behavior-train').disabled = !local || row.running || busy || detectorBusy;
+    $('behavior-cancel').disabled = !busy;
+    $('behavior-activate').hidden = job.phase !== 'completed';
+    $('behavior-activate').disabled = row.running || busy || detectorBusy;
+    $('behavior-bundled').disabled = row.running || busy || detectorBusy;
+    $('behavior-results').hidden = job.phase !== 'completed';
+    if (job.phase === 'completed') {
+      $('behavior-results').replaceChildren();
+      const headline = document.createElement('p');
+      headline.textContent = `Held-out clips: ${job.clips || 0} · Macro F1: ${((job.macro_f1 || 0) * 100).toFixed(1)}%`;
+      $('behavior-results').append(headline);
+      for (const label of ['eating', 'drinking', 'other']) {
+        const item = document.createElement('p'); const score = job.per_class?.[label] || {};
+        item.textContent = `${activityNames[label]} · precision ${((score.precision || 0) * 100).toFixed(1)}% · recall ${((score.recall || 0) * 100).toFixed(1)}% · ${score.examples || 0} test clips`;
+        $('behavior-results').append(item);
+      }
+    }
+    if (behavior.captured !== (status.captured || 0) && location.hash === '#behavior') action(refreshBehaviorLibrary);
+    behavior.captured = status.captured || 0;
+  }
+
+  async function refreshBehaviorLibrary() {
+    if (!trainingMode || behavior.busy) return;
+    behavior.busy = true;
+    try {
+      const data = await (await api('/api/behavior/library')).json();
+      behavior.clips = data.clips; behavior.sessions = data.sessions;
+      const selected = $('behavior-session').value;
+      $('behavior-session').replaceChildren(new Option('Choose a real recording period', ''));
+      for (const session of data.sessions) $('behavior-session').add(new Option(session.name, session.id));
+      $('behavior-session').value = data.sessions.some(session => session.id === selected) ? selected : data.sessions.at(-1)?.id || '';
+      const reviewed = data.clips.filter(clip => clip.label !== null).length;
+      $('behavior-stats').textContent = `${data.clips.length} clips · ${reviewed} reviewed · ${data.sessions.length} periods · showing up to 60`;
+      behavior.urls.forEach(URL.revokeObjectURL); behavior.urls = [];
+      $('behavior-clips').replaceChildren();
+      const filter = $('behavior-filter').value;
+      const clips = data.clips.filter(clip => filter === 'all' || (filter === 'unreviewed' ? clip.label === null : clip.label === filter)).slice(-60).reverse();
+      if (!clips.length) {
+        const text = document.createElement('p'); text.textContent = 'No clips match this filter. Collect a recording period or choose All clips.';
+        $('behavior-clips').append(text);
+      }
+      for (const clip of clips) {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'photo-card';
+        const image = document.createElement('img'); image.alt = `Review ${stationNames[clip.station]} clip`; image.loading = 'lazy';
+        const label = document.createElement('span'); label.textContent = `${activityNames[clip.label] || 'Review'} · ${stationNames[clip.station]} · ${clip.duration.toFixed(1)}s`;
+        button.append(image, label); button.onclick = () => action(() => openBehaviorClip(clip));
+        $('behavior-clips').append(button);
+        const url = URL.createObjectURL(await (await api(`/api/behavior/frame/${clip.id}/0`)).blob());
+        behavior.urls.push(url); image.src = url;
+      }
+    } finally { behavior.busy = false; }
+  }
+  $('behavior-filter').onchange = () => action(refreshBehaviorLibrary);
+  $('behavior-refresh').onclick = () => action(refreshBehaviorLibrary);
+  $('behavior-new-session').onclick = () => action(async () => {
+    const session = await (await api('/api/behavior/sessions', { name: $('behavior-session-name').value })).json();
+    $('behavior-session-name').value = ''; await refreshBehaviorLibrary(); $('behavior-session').value = session.id;
+  });
+  $('behavior-collect').onclick = () => action(async () => {
+    const enabled = !state.status?.behavior?.collecting;
+    if (enabled && !$('behavior-session').value) throw new Error('Create or choose the real recording period first.');
+    await api('/api/behavior/collect', { enabled, session: $('behavior-session').value });
+    toast(enabled ? 'Collecting station clips locally. Labels remain unreviewed.' : 'Clip collection stopped.');
+  });
+  function stopBehaviorPlayback() {
+    clearTimeout(behavior.timer); behavior.timer = null; behavior.playing = false;
+  }
+  function drawBehaviorFrame() {
+    const image = behavior.frames[behavior.index]; if (!image) return;
+    const canvas = $('behavior-canvas'); canvas.width = image.width; canvas.height = image.height;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+    $('behavior-scrub').value = behavior.index;
+    $('behavior-frame-number').textContent = `Frame ${behavior.index + 1} / ${behavior.frames.length}`;
+    $('behavior-play').textContent = behavior.playing ? 'Pause' : 'Play';
+  }
+  function playBehavior() {
+    drawBehaviorFrame();
+    if (!behavior.playing || !$('behavior-dialog').open) return;
+    const stamps = behavior.clip?.timestamps || [];
+    const delay = behavior.index + 1 < stamps.length ? Math.max(50, Math.min(1000, 1000 * (stamps[behavior.index + 1] - stamps[behavior.index]))) : 250;
+    behavior.timer = setTimeout(() => { behavior.index = (behavior.index + 1) % behavior.frames.length; playBehavior(); }, delay);
+  }
+  async function openBehaviorClip(clip) {
+    stopBehaviorPlayback(); behavior.generation += 1; const generation = behavior.generation;
+    behavior.frames.forEach(frame => frame.close()); behavior.frames = []; behavior.clip = clip; behavior.index = 0;
+    $('behavior-clip-description').textContent = `${clip.session_name} · ${stationNames[clip.station]} · loading…`;
+    if (!$('behavior-dialog').open) $('behavior-dialog').showModal();
+    const frames = [];
+    try {
+      for (let start = 0; start < clip.frames; start += 4) {
+        const chunk = await Promise.allSettled(Array.from({ length: Math.min(4, clip.frames - start) }, async (_, offset) =>
+          createImageBitmap(await (await api(`/api/behavior/frame/${clip.id}/${start + offset}`)).blob())));
+        for (const item of chunk) if (item.status === 'fulfilled') frames.push(item.value);
+        const failed = chunk.find(item => item.status === 'rejected');
+        if (failed) throw failed.reason;
+      }
+    } catch (error) { frames.forEach(frame => frame.close()); throw error; }
+    if (generation !== behavior.generation || !$('behavior-dialog').open) { frames.forEach(frame => frame.close()); return; }
+    behavior.frames = frames; behavior.playing = true;
+    $('behavior-clip-description').textContent = `${clip.session_name} · ${stationNames[clip.station]} · ${clip.duration.toFixed(1)} seconds · ${activityNames[clip.label] || 'Not reviewed'}`;
+    playBehavior();
+  }
+  $('behavior-close').onclick = () => $('behavior-dialog').close();
+  $('behavior-dialog').addEventListener('close', () => {
+    stopBehaviorPlayback(); behavior.generation += 1; behavior.frames.forEach(frame => frame.close()); behavior.frames = [];
+  });
+  $('behavior-play').onclick = () => { if (!behavior.frames.length) return; const playing = behavior.playing; stopBehaviorPlayback(); behavior.playing = !playing; playBehavior(); };
+  $('behavior-scrub').oninput = () => { stopBehaviorPlayback(); behavior.index = Number($('behavior-scrub').value); drawBehaviorFrame(); };
+  async function saveBehaviorLabel(label) {
+    if (behavior.saving || !behavior.clip || !behavior.frames.length) return;
+    behavior.saving = true;
+    try {
+      const key = behavior.clip.id;
+      await api('/api/behavior/labels', { id: key, label });
+      $('behavior-dialog').close(); await refreshBehaviorLibrary();
+      const next = behavior.clips.find(clip => clip.label === null && clip.id !== key);
+      if (next) await openBehaviorClip(next);
+    } finally { behavior.saving = false; }
+  }
+  document.querySelectorAll('[data-behavior-label]').forEach(button => {
+    button.onclick = () => action(() => saveBehaviorLabel(button.dataset.behaviorLabel));
+  });
+  document.addEventListener('keydown', event => {
+    if (!$('behavior-dialog').open || event.repeat) return;
+    const label = { e: 'eating', d: 'drinking', o: 'other', x: 'exclude' }[event.key.toLowerCase()];
+    if (label) { event.preventDefault(); action(() => saveBehaviorLabel(label)); }
+  });
+  $('behavior-train').onclick = () => action(async () => {
+    await api('/api/behavior/train', { epochs: Number($('behavior-epochs').value) }); toast('Activity training started locally.');
+  });
+  $('behavior-cancel').onclick = () => action(async () => { await api('/api/behavior/train/cancel', {}); });
+  $('behavior-activate').onclick = () => action(async () => {
+    await api('/api/behavior/train/activate', {}); state.configLoaded = false; toast('Candidate selected for local evaluation.');
+  });
+  $('behavior-bundled').onclick = () => action(async () => {
+    await api('/api/behavior/model/bundled', {}); state.configLoaded = false; toast('Included activity model selected.');
+  });
+  $('activity-export').onclick = () => action(async () => {
+    const url = URL.createObjectURL(await (await api('/api/behavior/report.csv')).blob());
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'cat-care-activities.csv';
+    anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  addEventListener('beforeunload', () => { revokeGallery(); state.frame?.close(); state.labelImage?.close(); stopBehaviorPlayback(); behavior.urls.forEach(URL.revokeObjectURL); behavior.frames.forEach(frame => frame.close()); });
   navigate();
   poll();
   getFrame();

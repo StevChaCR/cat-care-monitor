@@ -69,7 +69,7 @@ class LocalApiTests(unittest.TestCase):
             self.addCleanup(item.stop)
         self.runtime = WebRuntime()
         self.runtime.config = {**copy.deepcopy(DEFAULTS), "device": "cpu", "crop": False}
-        self.server = make_server(self.runtime, 0)
+        self.server = make_server(self.runtime, 0, training_mode=True)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.close_server)

@@ -1,5 +1,13 @@
 # Cat Care Monitor
 
+## Version 0.3: simple user mode and developer activity training
+
+The normal web launcher now exposes camera setup and observations. Photo labeling and model training are developer tools, opened with **`start_training_windows.bat`** or `python web_app.py --open --training`. End users do not have to create a personal dataset.
+
+The new behavior pipeline collects and reviews short station sequences, trains a separate temporal classifier, and can include that model in a release for automatic eating/drinking estimates. **No eating/drinking-trained weights are included in this source archive.** Until a developer trains, evaluates, and bundles a model, activity recognition is shown as unavailable and station-visit counting continues. Existing cat-detection training and private data are retained.
+
+See **[Eating and drinking recognition](docs/BEHAVIOR.md)** for the developer workflow, release bundling command, event rules, upgrade instructions, and validation limits. The original desktop monitor remains available; the new behavior pipeline is integrated in the local browser engine.
+
 A local Python application with browser and desktop interfaces. It connects to an existing authenticated **local RTSP camera** and estimates one cat's visits to a litter box, food station, and water station.
 
 ## Browser interface and GitHub Pages
@@ -9,10 +17,10 @@ On Windows, double-click **`start_web_windows.bat`**. It installs the dependenci
 The browser interface includes:
 
 - Full-frame camera preview, persistent tracking boxes, and draggable station zones. Connect once for a preview, disconnect to draw on the last frame, save, then reconnect.
-- A cat profile with its own photos, reviewed labels, station settings, and selected model. Profile names identify local workspaces, not individual animals in the video.
-- JPEG/PNG import, a full-frame box editor, and explicit empty-scene labels.
-- Optional automatic camera capture independent of the detector, including missed cats and misclassifications. It keeps up to 120 images per camera run. Captures require review before training.
-- A cancellable local training process with actual epoch progress and held-out test metrics. It requires reviewed data from at least three independent recording sessions. The new model is selected explicitly after review; training does not guarantee improved live counts.
+- In developer mode, a cat profile with its own photos, reviewed labels, station settings, and selected model. Profile names identify local workspaces, not individual animals in the video.
+- In developer mode, JPEG/PNG import, a full-frame box editor, and explicit empty-scene labels.
+- In developer mode, optional automatic camera capture independent of the detector, including missed cats and misclassifications. It keeps up to 120 images per camera run. Captures require review before training.
+- In developer mode, a cancellable local training process with actual epoch progress and held-out test metrics. It requires reviewed data from at least three independent recording sessions. The new model is selected explicitly after review; training does not guarantee improved live counts.
 
 Publish the **`docs/` folder** as a GitHub Pages site. The public site displays the interface and instructions for opening the local app. Camera credentials, photo import, and training are enabled only on the authenticated local engine. GitHub Pages does not run Python, open RTSP streams, or supply a training GPU. See [GitHub Pages setup](docs/GITHUB_PAGES.md).
 

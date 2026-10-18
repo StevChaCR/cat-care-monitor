@@ -21,7 +21,7 @@ from catcare.config import ROOT
 from catcare.web_runtime import WebRuntime
 
 
-def make_server(runtime, port=8765):
+def make_server(runtime, port=8765, training_mode=False):
     token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -78,6 +78,9 @@ def make_server(runtime, port=8765):
             path = urlsplit(self.path).path
             if not self.guarded(path.startswith("/api/")):
                 return
+            if not training_mode and (path == "/api/library" or path.startswith(("/api/image/", "/api/thumbnail/", "/api/behavior/frame/")) or path == "/api/behavior/library"):
+                self.reply({"error": "The training laboratory is disabled in normal mode."}, 403)
+                return
             try:
                 if path == "/api/status":
                     self.reply({"version": __version__, **runtime.status()})
@@ -91,6 +94,18 @@ def make_server(runtime, port=8765):
                         self.send(200, frame, "image/jpeg")
                 elif path == "/api/library":
                     self.reply({"sessions": runtime.library.sessions(), "images": runtime.library.images()})
+                elif path == "/api/behavior/library":
+                    self.reply({"sessions": runtime.behavior_library.sessions(), "clips": runtime.behavior_library.clips()})
+                elif path.startswith("/api/behavior/frame/"):
+                    key, index = path.removeprefix("/api/behavior/frame/").rsplit("/", 1)
+                    self.send(200, runtime.behavior_library.frame_path(key, int(index)).read_bytes(), "image/jpeg")
+                elif path == "/api/behavior/report.csv":
+                    from catcare.config import LOCAL, profile_stem
+                    report = LOCAL / "reports" / f"activities_{profile_stem(runtime.config['cat_label'])}.csv"
+                    if report.is_file():
+                        self.send(200, report.read_bytes(), "text/csv; charset=utf-8")
+                    else:
+                        self.reply({"error": "No activity report has been recorded yet."}, 404)
                 elif path.startswith("/api/image/"):
                     self.send(200, runtime.library.image_path(path.removeprefix("/api/image/")).read_bytes(), "image/jpeg")
                 elif path.startswith("/api/thumbnail/"):
@@ -109,7 +124,7 @@ def make_server(runtime, port=8765):
                         self.reply({"error": "No visit report has been recorded yet."}, 404)
                 else:
                     files = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js",
-                             "/styles.css": "styles.css", "/icon.svg": "icon.svg"}
+                             "/styles.css": "styles.css", "/behavior.css": "behavior.css", "/icon.svg": "icon.svg"}
                     filename = files.get(path)
                     if filename is None:
                         self.reply({"error": "Not found."}, 404)
@@ -117,6 +132,7 @@ def make_server(runtime, port=8765):
                     data = (ROOT / "docs" / filename).read_bytes()
                     if filename == "index.html":
                         data = data.replace(b"__ENGINE_TOKEN__", token.encode())
+                        data = data.replace(b"__TRAINING_MODE__", b"true" if training_mode else b"false")
                     self.send(200, data, mimetypes.guess_type(filename)[0] or "application/octet-stream")
             except ValueError as error:
                 self.reply({"error": str(error)}, 400)
@@ -127,6 +143,10 @@ def make_server(runtime, port=8765):
             if not self.guarded(api=True):
                 return
             path = urlsplit(self.path).path
+            lab_routes = {"/api/collect", "/api/sessions", "/api/labels", "/api/train", "/api/train/cancel", "/api/train/activate"}
+            if not training_mode and (path in lab_routes or path.startswith(("/api/upload/", "/api/behavior/"))):
+                self.reply({"error": "Open the developer training launcher to use the laboratory."}, 403)
+                return
             try:
                 if path.startswith("/api/upload/"):
                     session_id = path.removeprefix("/api/upload/")
@@ -171,6 +191,21 @@ def make_server(runtime, port=8765):
                     runtime.training.cancel()
                 elif path == "/api/train/activate":
                     runtime.activate_model()
+                elif path == "/api/behavior/sessions":
+                    self.reply(runtime.behavior_library.create_session(data.get("name", "")))
+                    return
+                elif path == "/api/behavior/collect":
+                    runtime.collect_behavior(data.get("enabled") is True, data.get("session"))
+                elif path == "/api/behavior/labels":
+                    runtime.behavior_library.label_clip(data.get("id"), data.get("label"))
+                elif path == "/api/behavior/train":
+                    runtime.start_behavior_training(data.get("epochs", 60))
+                elif path == "/api/behavior/train/cancel":
+                    runtime.behavior_training.cancel()
+                elif path == "/api/behavior/train/activate":
+                    runtime.activate_behavior_model()
+                elif path == "/api/behavior/model/bundled":
+                    runtime.activate_behavior_model(bundled=True)
                 else:
                     self.reply({"error": "Not found."}, 404)
                     return
@@ -189,10 +224,11 @@ def main():
     parser = argparse.ArgumentParser(description="Open Cat Care Monitor in your browser, using a private local engine.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--open", action="store_true", help="Open the local interface automatically")
+    parser.add_argument("--training", action="store_true", help="Enable the developer-only image and activity training laboratory")
     args = parser.parse_args()
     runtime = WebRuntime()
     try:
-        server = make_server(runtime, args.port)
+        server = make_server(runtime, args.port, training_mode=args.training)
     except OSError:
         raise SystemExit("The local port is busy. Close the other Cat Care window or choose --port 8766.") from None
     url = f"http://127.0.0.1:{server.server_port}"

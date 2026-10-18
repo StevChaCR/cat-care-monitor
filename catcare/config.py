@@ -2,12 +2,30 @@
 import hashlib
 import json
 import math
+import re
+import os
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOCAL = ROOT / "local"
+
+
+def data_directory():
+    if not getattr(sys, "frozen", False):
+        return ROOT / "local"  # Preserve existing source installations unchanged.
+    if sys.platform == "win32":
+        parent = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    elif sys.platform == "darwin":
+        parent = Path.home() / "Library" / "Application Support"
+    else:
+        parent = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return parent / "WatchMyCat"
+
+
+LOCAL = data_directory()
 DEFAULTS = {"cat_label": "Cat", "model": "yolo26n.pt", "device": "auto",
-            "confidence": 0.25, "image_size": 960, "crop": True, "zones": {}}
+            "confidence": 0.25, "image_size": 960, "crop": True, "zones": {},
+            "behavior_model": "bundled"}
 
 
 def load_settings():
@@ -41,6 +59,9 @@ def validate_settings(values):
         raise ValueError("Image size must be between 32 and 2048.")
     if values["device"] not in ("auto", "cpu", "0"):
         raise ValueError("Choose auto, cpu, or GPU 0.")
+    activity_model = values.get("behavior_model", "bundled")
+    if activity_model not in ("", "bundled") and not (isinstance(activity_model, str) and re.fullmatch(r"[a-f0-9]{32}", activity_model)):
+        raise ValueError("Choose the included activity model or a completed local training run.")
     return {**values, "cat_label": label, "confidence": confidence, "image_size": size}
 
 
@@ -55,3 +76,13 @@ def save_settings(values):
 
 def profile_stem(label):
     return hashlib.sha256(label.encode("utf-8")).hexdigest()[:16]
+
+
+def activity_model_path(profile, selected):
+    if selected == "bundled":
+        path = ROOT / "assets" / "behavior" / "model.json"
+    elif isinstance(selected, str) and re.fullmatch(r"[a-f0-9]{32}", selected):
+        path = Path(profile) / "behavior" / "training" / selected / "model.json"
+    else:
+        return None
+    return path if path.is_file() else None

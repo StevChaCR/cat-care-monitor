@@ -15,5 +15,5 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-".venv\Scripts\python.exe" web_app.py --open
+".venv\Scripts\python.exe" web_app.py --open %*
 if errorlevel 1 pause

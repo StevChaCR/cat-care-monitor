@@ -1,8 +1,11 @@
 .venv/
+venv/
 local/
 __pycache__/
 *.py[cod]
 *.pt
+*.pth
+*.npz
 *.weights
 *.sqlite3
 *.sqlite3-*
@@ -11,9 +14,11 @@ __pycache__/
 *.mp4
 *.avi
 *.mov
-*.gif
 .env
 .env.*
 !.env.example
+build/
+dist/
+*.exe
 .DS_Store
 Thumbs.db

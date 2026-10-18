@@ -76,3 +76,34 @@ class TrainingJob:
                     self.process.kill()
                     self.process.wait(timeout=5)
                 self.phase = "cancelled"
+
+
+class BehaviorTrainingJob(TrainingJob):
+    def start(self, profile, images, epochs, device):
+        from .behavior_data import prepare_behavior_dataset
+        with self.lock:
+            if self.busy():
+                raise ValueError("Behavior training is already running.")
+            if type(epochs) is not int or not 5 <= epochs <= 200:
+                raise ValueError("Choose between 5 and 200 training epochs.")
+            folder = Path(profile) / "behavior" / "training" / uuid.uuid4().hex
+            prepare_behavior_dataset(images, folder / "dataset.json")
+            self.folder, self.weights, self.phase = folder, None, "preparing"
+            progress = folder / "progress.json"
+            progress.write_text(json.dumps({"phase": "preparing", "epoch": 0, "epochs": epochs}), encoding="utf-8")
+            command = [sys.executable, str(ROOT / "tools" / "train_behavior.py"),
+                       "--dataset", str(folder / "dataset.json"), "--output", str(folder),
+                       "--epochs", str(epochs), "--device", device, "--progress-file", str(progress)]
+            with (folder / "training.log").open("w", encoding="utf-8") as log:
+                self.process = subprocess.Popen(command, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+
+    def status(self):
+        row = super().status()
+        if row.get("phase") == "failed" and self.folder:
+            try:
+                details = json.loads((self.folder / "progress.json").read_text(encoding="utf-8"))
+                if details.get("phase") == "failed":
+                    row["message"] = details.get("message", row.get("message"))
+            except (OSError, ValueError):
+                pass
+        return row

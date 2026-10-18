@@ -1,5 +1,7 @@
 # Publish the Cat Care frontend
 
+Version 0.3 separates normal user mode from the developer training laboratory. Normal mode only needs a camera and stations. Use `start_training_windows.bat` for image labeling, behavior-clip collection, and model training. See [behavior recognition](BEHAVIOR.md) to train and include a shared activity model before release. No trained eating/drinking weights are included in this source update.
+
 The static frontend is in `docs/`. It uses relative asset paths and supports both a user-site root and a project subdirectory. It needs no Node build, CDN scripts, or API key.
 
 ## Publish

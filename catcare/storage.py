@@ -17,8 +17,15 @@ class Store:
                         "entered_at REAL, last_seen_at REAL, status TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS coverage ("
                         "id INTEGER PRIMARY KEY, started_at REAL, ended_at REAL)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS activities ("
+                        "id INTEGER PRIMARY KEY, station TEXT, started_at REAL, last_seen_at REAL, "
+                        "status TEXT, uncertain INTEGER, model_id TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS activity_intervals ("
+                        "activity_id INTEGER, sequence INTEGER, started_at REAL, ended_at REAL, "
+                        "PRIMARY KEY(activity_id,sequence))")
         if recover:
             self.db.execute("UPDATE visits SET status='interrupted' WHERE status='in_progress'")
+            self.db.execute("UPDATE activities SET status='interrupted',uncertain=1 WHERE status='in_progress'")
         self.db.commit()
         self.coverage_id = None
         self.last_coverage = None
@@ -102,3 +109,62 @@ class Store:
 
     def close(self):
         self.db.close()
+
+    def resume_activity(self, station, model_id):
+        from .behavior import ActivitySession
+        row = self.db.execute("SELECT id,started_at,last_seen_at,status,uncertain,model_id "
+                              "FROM activities WHERE station=? ORDER BY id DESC LIMIT 1", (station,)).fetchone()
+        if not row or row[3] == "completed" or row[5] != model_id:
+            return None
+        intervals = [list(pair) for pair in self.db.execute(
+            "SELECT started_at,ended_at FROM activity_intervals WHERE activity_id=? ORDER BY sequence", (row[0],))]
+        return ActivitySession(row[1], row[2], intervals, "in_progress", True, row[0])
+
+    def write_activity(self, station, activity, model_id):
+        if activity.row_id is None:
+            activity.row_id = self.db.execute("INSERT INTO activities(station,started_at,last_seen_at,status,uncertain,model_id) "
+                "VALUES(?,?,?,?,?,?)", (station, activity.started_at, activity.last_seen_at,
+                                      activity.status, int(activity.uncertain), model_id)).lastrowid
+        else:
+            self.db.execute("UPDATE activities SET last_seen_at=?,status=?,uncertain=? WHERE id=?",
+                (activity.last_seen_at, activity.status, int(activity.uncertain), activity.row_id))
+        for index, (start, end) in enumerate(activity.intervals):
+            self.db.execute("INSERT INTO activity_intervals VALUES(?,?,?,?) "
+                            "ON CONFLICT(activity_id,sequence) DO UPDATE SET ended_at=excluded.ended_at",
+                            (activity.row_id, index, start, end))
+        self.db.commit()
+
+    def activity_summary(self, now, window_seconds=86400):
+        cutoff = now - window_seconds
+        result = {name: {"sessions": 0, "observed_seconds": 0., "incomplete": 0}
+                  for name in ("food", "water")}
+        for row_id, station, started, last_seen, uncertain, status in self.db.execute(
+                "SELECT id,station,started_at,last_seen_at,uncertain,status FROM activities "
+                "WHERE started_at<=? AND last_seen_at>=?", (now, cutoff)):
+            if station not in result:
+                continue
+            if started >= cutoff:
+                result[station]["sessions"] += 1
+                result[station]["incomplete"] += int(bool(uncertain) or status == "interrupted")
+            for start, end in self.db.execute("SELECT started_at,ended_at FROM activity_intervals WHERE activity_id=?", (row_id,)):
+                result[station]["observed_seconds"] += max(0, min(now, end) - max(cutoff, start))
+        return result
+
+    def export_activities(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        try:
+            with temporary.open("w", newline="", encoding="utf-8-sig") as output:
+                writer = csv.writer(output)
+                writer.writerow(["id", "station", "activity", "started_at_UTC", "last_observed_at_UTC",
+                                 "observed_activity_seconds", "status", "incomplete", "model_id"])
+                for row_id, station, start, end, status, uncertain, model_id in self.db.execute("SELECT * FROM activities ORDER BY id"):
+                    observed = self.db.execute("SELECT coalesce(sum(ended_at-started_at),0) FROM activity_intervals "
+                                               "WHERE activity_id=?", (row_id,)).fetchone()[0]
+                    writer.writerow([row_id, station, "probable_eating" if station == "food" else "probable_drinking",
+                                     iso_timestamp(start), iso_timestamp(end), round(observed, 2), status, uncertain, model_id])
+            temporary.replace(path)
+            return True
+        except PermissionError:
+            temporary.unlink(missing_ok=True)
+            return False

@@ -5,14 +5,15 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from .config import DEFAULTS, LOCAL, load_settings, profile_stem, save_settings, validate_settings
+from .config import DEFAULTS, LOCAL, load_settings, profile_stem, save_settings, validate_settings, activity_model_path
 from .core import VisitCounter, assign_station, pixel_zones, station_presence, validate_zones
 from .display import FrameRate
 from .diagnostics import diagnostic, gpu_failure, save_diagnostic
 from .security import validate_rtsp
 from .storage import Store
 from .web_data import ImageLibrary
-from .web_training import TrainingJob
+from .web_training import TrainingJob, BehaviorTrainingJob
+from .behavior_data import ClipLibrary
 
 
 class WebRuntime:
@@ -25,6 +26,8 @@ class WebRuntime:
         self.worker = None
         self.stop_event = threading.Event()
         self.training = TrainingJob()
+        self.behavior_training = BehaviorTrainingJob()
+        self.behavior_capture_session = None
         self.collecting = False
         self.collection_session = None
         self.collection_count = 0
@@ -35,6 +38,8 @@ class WebRuntime:
                       "detections": [], "tracks": [], "ai_fps": 0, "video_fps": 0,
                       "summary": None, "processor": None, "frame_shape": None,
                       "error": None, "notice": None}
+        self.state["behavior"] = {"phase": "not_available", "stations": {}, "summary": None,
+                                  "collecting": False, "captured": 0, "error": None}
 
     @property
     def profile(self):
@@ -51,16 +56,28 @@ class WebRuntime:
     def active(self):
         return self.worker is not None and self.worker.is_alive()
 
+    @property
+    def behavior_library(self):
+        with self.lock:
+            path = self.profile / "behavior" / "sessions"
+            if path not in self._libraries:
+                self._libraries[path] = ClipLibrary(path)
+            return self._libraries[path]
+
+    def training_busy(self):
+        return self.training.busy() or self.behavior_training.busy()
+
     def status(self):
         with self.lock:
             return {**copy.deepcopy(self.state), "config": copy.deepcopy(self.config),
                     "running": self.active(),
                     "collecting": self.collecting, "collected": self.collection_count,
-                    "training": self.training.status()}
+                    "training": self.training.status(), "behavior_training": self.behavior_training.status(),
+                    "activity_model_available": activity_model_path(self.profile, self.config.get("behavior_model", "bundled")) is not None}
 
     def settings(self, values):
         with self.lock:
-            if self.active() or self.training.busy():
+            if self.active() or self.training_busy():
                 raise ValueError("Stop the camera and training before changing the profile.")
             allowed = {key: values[key] for key in ("cat_label", "device", "confidence", "image_size") if key in values}
             changed_profile = allowed.get("cat_label", self.config["cat_label"]) != self.config["cat_label"]
@@ -74,6 +91,10 @@ class WebRuntime:
                     previous = json.loads(saved.read_text(encoding="utf-8"))
                     base.update({key: previous[key] for key in DEFAULTS if key in previous})
                 self.training = TrainingJob()
+                self.behavior_training = BehaviorTrainingJob()
+                self.behavior_capture_session = None
+                self.state["behavior"] = {"phase": "not_available", "stations": {}, "summary": None,
+                                          "collecting": False, "captured": 0, "error": None}
                 self.collection_session = None
                 self.state.update(summary=None, detections=[], tracks=[])
             candidate = {**base, **allowed, "crop": False}
@@ -106,7 +127,7 @@ class WebRuntime:
 
     def connect(self, source):
         with self.lock:
-            if self.active() or self.training.busy():
+            if self.active() or self.training_busy():
                 raise ValueError("Stop the current camera or training job first.")
             source = validate_rtsp(source)
             self.stop_event = threading.Event()
@@ -122,6 +143,7 @@ class WebRuntime:
         with self.lock:
             self.stop_event.set()
             self.collecting = False
+            self.behavior_capture_session = None
             worker = self.worker
         if worker is not None:
             worker.join(timeout=15)
@@ -158,18 +180,19 @@ class WebRuntime:
             return self.encoded_frame
 
     def start_training(self, epochs):
-        if self.active():
-            raise ValueError("Disconnect the camera before training so it can use the available processor.")
-        device = self.config["device"]
-        if device == "auto":
-            import torch
-            device = "0" if torch.cuda.is_available() else "cpu"
-        self.training.start(self.profile, self.library.root, self.config["model"], epochs,
-                            min(self.config["image_size"], 960), device)
+        with self.lock:
+            if self.active() or self.training_busy():
+                raise ValueError("Disconnect the camera before training so it can use the available processor.")
+            device = self.config["device"]
+            if device == "auto":
+                import torch
+                device = "0" if torch.cuda.is_available() else "cpu"
+            self.training.start(self.profile, self.library.root, self.config["model"], epochs,
+                                min(self.config["image_size"], 960), device)
 
     def activate_model(self):
         with self.lock:
-            if self.active() or self.training.busy():
+            if self.active() or self.training_busy():
                 raise ValueError("Stop the camera before changing models.")
             status = self.training.status()
             if status.get("phase") != "completed" or self.training.weights is None:
@@ -177,11 +200,44 @@ class WebRuntime:
             self.config["model"] = str(self.training.weights.resolve())
             self._save_config()
 
+    def collect_behavior(self, enabled, session_id=None):
+        with self.lock:
+            if enabled:
+                if not self.active():
+                    raise ValueError("Connect the camera before collecting behavior clips.")
+                if not set(self.config["zones"]) & {"food", "water"}:
+                    raise ValueError("Configure a food or water zone before collecting clips.")
+                self.behavior_library.session_path(session_id)
+                self.behavior_capture_session = session_id
+            else:
+                self.behavior_capture_session = None
+
+    def start_behavior_training(self, epochs):
+        with self.lock:
+            if self.active() or self.training_busy():
+                raise ValueError("Disconnect the camera and stop other training jobs first.")
+            self.behavior_training.start(self.profile, self.behavior_library.root, epochs, self.config["device"])
+
+    def activate_behavior_model(self, bundled=False):
+        with self.lock:
+            if self.active() or self.training_busy():
+                raise ValueError("Disconnect the camera and stop training before selecting an activity model.")
+            if bundled:
+                selected = "bundled"
+            else:
+                row = self.behavior_training.status()
+                if row.get("phase") != "completed" or self.behavior_training.weights is None:
+                    raise ValueError("Train and review an activity model first.")
+                selected = self.behavior_training.folder.name
+            self.config["behavior_model"] = selected
+            self._save_config()
+
     def _run(self, config, source):
+        from .behavior_runtime import BehaviorService
         from .camera import Camera
         from .detector import LatestDetector
         from .monitor import initialize_model
-        detector = store = camera = None
+        detector = store = camera = behavior = None
         model, cat_ids, device = None, [], None
         private_source = source
         stage = "camera"
@@ -239,6 +295,8 @@ class WebRuntime:
                 if visit and name in active_ids:
                     store.update_visit(active_ids.pop(name), visit)
             store.break_coverage()
+            if behavior:
+                behavior.interrupt()
 
         try:
             import cv2
@@ -261,6 +319,9 @@ class WebRuntime:
                                   frame_shape=list(sample[2].shape[:2]))
             stage = "storage"
             store = Store(LOCAL / "data" / f"visits_{profile_stem(config['cat_label'])}.sqlite3")
+            behavior = BehaviorService(config, self.behavior_library, store,
+                activity_model_path(self.profile, config.get("behavior_model", "bundled")),
+                LOCAL / "models", config["device"])
             stage = "model"
             try:
                 start_detector(config)
@@ -280,6 +341,7 @@ class WebRuntime:
                     with self.lock:
                         self.state.update(phase="connecting", message="Waiting for live camera video…",
                                           detections=[], tracks=[])
+                        self.state["behavior"]["stations"] = {name: "uncertain" for name in config["zones"] if name in ("food", "water")}
                     continue
                 sequence, timestamp, frame = sample
                 if sequence != last_sequence:
@@ -302,6 +364,7 @@ class WebRuntime:
                         height, width = prediction.image_shape[:2]
                         rectangles = pixel_zones(config["zones"], width, height)
                         cats = [box for box, _, label in prediction.detections if label in cat_ids]
+                        behavior.on_prediction(cats, prediction.timestamp, prediction.image_shape)
                         occupied, ambiguous = (assign_station(cats[0], rectangles) if len(cats) == 1
                                                else (None, set(rectangles) if len(cats) > 1 else set()))
                         if counters:
@@ -328,6 +391,14 @@ class WebRuntime:
                     store.break_coverage()
                     for counter in counters.values():
                         counter.observe(None, now)
+                with self.lock:
+                    behavior_capture = self.behavior_capture_session
+                behavior.observe_frame(sequence, timestamp, frame, behavior_capture)
+                activity_state = behavior.poll(now)
+                with self.lock:
+                    self.state["behavior"] = activity_state
+                    if activity_state["captured"] >= 120:
+                        self.behavior_capture_session = None
                 if tick - last_summary >= 1:
                     phase = "live" if detector else "preview"
                     message = ("Monitoring station visits." if counters else "Live preview · select station zones to count visits.") if detector else "Camera connected · preview only. Detection is unavailable; see the error details."
@@ -359,6 +430,7 @@ class WebRuntime:
                         collection_previous, last_capture = thumbnail, tick
                 if tick - last_export >= 10:
                     store.export(LOCAL / "reports" / f"visits_{profile_stem(config['cat_label'])}.csv")
+                    store.export_activities(LOCAL / "reports" / f"activities_{profile_stem(config['cat_label'])}.csv")
                     last_export = tick
         except Exception as error:
             row = report(stage, error)
@@ -366,10 +438,20 @@ class WebRuntime:
                 self.state.update(phase="error", message=row["message"],
                                   detections=[], tracks=[])
         finally:
+            if behavior:
+                try:
+                    behavior.stop()
+                    with self.lock:
+                        self.state["behavior"]["summary"] = store.activity_summary(time.time())
+                        self.state["behavior"]["collecting"] = False
+                        self.state["behavior"]["phase"] = "offline"
+                except Exception:
+                    pass
             if store:
                 try:
                     interrupt_all()
                     store.export(LOCAL / "reports" / f"visits_{profile_stem(config['cat_label'])}.csv")
+                    store.export_activities(LOCAL / "reports" / f"activities_{profile_stem(config['cat_label'])}.csv")
                     with self.lock:
                         self.state["summary"] = store.summary(time.time())
                 except Exception as error:
@@ -391,10 +473,12 @@ class WebRuntime:
                 self.camera = None
                 self.collecting = False
                 self.collection_session = None
+                self.behavior_capture_session = None
                 self.state.update(ai_fps=0, video_fps=0)
                 if self.state["phase"] != "error":
                     self.state.update(phase="offline", message="Camera disconnected.", detections=[], tracks=[])
 
     def close(self):
         self.training.cancel()
+        self.behavior_training.cancel()
         self.disconnect()
