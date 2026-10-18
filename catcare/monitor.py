@@ -9,6 +9,7 @@ from .core import STATIONS, VisitCounter, assign_station, pixel_zones, station_p
 from .detector import LatestDetector, processing_crop
 from .display import FrameRate, fit_frame, normalized_roi, screen_bounds, status_view
 from .storage import Store
+from .models import resolve_detector
 
 WINDOW = "Cat Care Monitor | Q quit | S save frame | D detection labels"
 
@@ -44,11 +45,8 @@ def initialize_model(config):
                 device = "0"
             except RuntimeError:
                 pass
-    if config["model"] in ("yolo26n.pt", "yolo26s.pt"):
-        path = LOCAL / "models" / config["model"]
-        path.parent.mkdir(parents=True, exist_ok=True)
-    else:
-        path = Path(config["model"])
+    path = resolve_detector(config["model"])
+    path.parent.mkdir(parents=True, exist_ok=True)
     print("Loading the detector. The first run may download pretrained weights.")
     model = YOLO(str(path))
     cat_ids = [index for index, name in model.names.items() if name.lower() == "cat"]

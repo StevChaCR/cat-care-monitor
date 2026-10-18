@@ -9,7 +9,7 @@ import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 # Set native decoder privacy options before photo import can load OpenCV.
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp"
@@ -95,10 +95,12 @@ def make_server(runtime, port=8765, training_mode=False):
                 elif path == "/api/library":
                     self.reply({"sessions": runtime.library.sessions(), "images": runtime.library.images()})
                 elif path == "/api/behavior/library":
-                    self.reply({"sessions": runtime.behavior_library.sessions(), "clips": runtime.behavior_library.clips()})
+                    self.reply({"sessions": runtime.behavior_library.sessions(), "clips": runtime.behavior_library.clips(),
+                                "trash": runtime.behavior_library.trashed_clips()})
                 elif path.startswith("/api/behavior/frame/"):
                     key, index = path.removeprefix("/api/behavior/frame/").rsplit("/", 1)
-                    self.send(200, runtime.behavior_library.frame_path(key, int(index)).read_bytes(), "image/jpeg")
+                    trashed = parse_qs(urlsplit(self.path).query).get("trash") == ["1"]
+                    self.send(200, runtime.behavior_library.frame_path(key, int(index), trashed=trashed).read_bytes(), "image/jpeg")
                 elif path == "/api/behavior/report.csv":
                     from catcare.config import LOCAL, profile_stem
                     report = LOCAL / "reports" / f"activities_{profile_stem(runtime.config['cat_label'])}.csv"
@@ -143,7 +145,7 @@ def make_server(runtime, port=8765, training_mode=False):
             if not self.guarded(api=True):
                 return
             path = urlsplit(self.path).path
-            lab_routes = {"/api/collect", "/api/sessions", "/api/labels", "/api/train", "/api/train/cancel", "/api/train/activate"}
+            lab_routes = {"/api/collect", "/api/sessions", "/api/labels", "/api/train", "/api/train/cancel", "/api/train/activate", "/api/train/bundle", "/api/performance"}
             if not training_mode and (path in lab_routes or path.startswith(("/api/upload/", "/api/behavior/"))):
                 self.reply({"error": "Open the developer training launcher to use the laboratory."}, 403)
                 return
@@ -191,13 +193,23 @@ def make_server(runtime, port=8765, training_mode=False):
                     runtime.training.cancel()
                 elif path == "/api/train/activate":
                     runtime.activate_model()
+                elif path == "/api/train/bundle":
+                    row = runtime.bundle_model()
+                    self.reply({"version": row["version"], "sha256": row["sha256"]})
+                    return
                 elif path == "/api/behavior/sessions":
                     self.reply(runtime.behavior_library.create_session(data.get("name", "")))
                     return
                 elif path == "/api/behavior/collect":
-                    runtime.collect_behavior(data.get("enabled") is True, data.get("session"))
+                    runtime.collect_behavior(data.get("enabled") is True, data.get("session"), data.get("station", "both"))
+                elif path == "/api/performance":
+                    runtime.set_inference_size(data.get("image_size"))
                 elif path == "/api/behavior/labels":
-                    runtime.behavior_library.label_clip(data.get("id"), data.get("label"))
+                    runtime.label_behavior_clip(data.get("id"), data.get("label"))
+                elif path in ("/api/behavior/clips/trash", "/api/behavior/clips/restore", "/api/behavior/clips/purge"):
+                    count = runtime.manage_behavior_clips(path.rsplit("/", 1)[1], data.get("ids"))
+                    self.reply({"ok": True, "count": count})
+                    return
                 elif path == "/api/behavior/train":
                     runtime.start_behavior_training(data.get("epochs", 60))
                 elif path == "/api/behavior/train/cancel":

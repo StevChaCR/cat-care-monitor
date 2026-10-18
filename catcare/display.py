@@ -11,9 +11,12 @@ class FrameRate:
         self.samples.append(timestamp)
 
     def value(self, now):
-        while self.samples and self.samples[0] < now - 2:
+        # Keep one predecessor so a slow detector can report e.g. 0.3 FPS
+        # rather than always losing its previous completion from the window.
+        while len(self.samples) > 2 and self.samples[1] < now - 2:
             self.samples.popleft()
-        if len(self.samples) < 2 or self.samples[-1] <= self.samples[0]:
+        if (len(self.samples) < 2 or self.samples[-1] <= self.samples[0] or
+                now - self.samples[-1] > 2):
             return 0.0
         return (len(self.samples) - 1) / (self.samples[-1] - self.samples[0])
 

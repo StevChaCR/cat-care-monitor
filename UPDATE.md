@@ -1,5 +1,9 @@
 # Update an existing installation
 
+Version 0.4.1 adds **Food only / Water only / Both** behavior collection, station filters, recoverable clip trash, restore, batch cleanup of Cannot tell clips, and confirmed permanent emptying of trash. Choose the station before starting collection; clips still require activity review. See `docs/BEHAVIOR.md` for cleanup and focused collection instructions.
+
+Version 0.4.0 keeps one selected detector, continues training from its weights, preserves recording-session split assignments, compares the previous cat-only detector against the candidate on the same test images, and bundles the selected detector for new installations. The performance controls from 0.3.1 remain available. See `docs/SHARED_MODEL.md`.
+
 1. Stop the running local engine.
 2. Extract the update ZIP into a temporary folder. Copy all files and folders directly inside it into your existing project folder, replacing the source files. The update ZIP has no additional enclosing project folder.
 3. Keep your existing `local/` and `.venv/` folders and your icon/launcher files. This ZIP does not contain or replace your private data.

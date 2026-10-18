@@ -1,6 +1,8 @@
 # Cat Care Monitor
 
-## Version 0.3: simple user mode and developer activity training
+## Version 0.4: one shared detector and developer training
+
+Version 0.4.1 adds station-specific behavior collection and clip cleanup. In the Behavior lab, collect **Food only**, **Water only**, or both; review the actual activity before labeling. Move bad clips to recoverable trash, restore them from the Trash filter, or permanently empty the trash to reclaim disk space. See [the behavior workflow](docs/BEHAVIOR.md).
 
 The normal web launcher now exposes camera setup and observations. Photo labeling and model training are developer tools, opened with **`start_training_windows.bat`** or `python web_app.py --open --training`. End users do not have to create a personal dataset.
 
@@ -26,7 +28,7 @@ Publish the **`docs/` folder** as a GitHub Pages site. The public site displays 
 
 The browser engine binds only to `127.0.0.1`. It uses a fresh session token and rejects other website origins; it does not expose a camera API to the internet. Open the app on the same computer that runs the engine. The public site and local app share the same frontend files; no cloud bridge or account is required.
 
-Private web images and per-profile settings live under `local/web/<profile>/`. The existing desktop S captures remain under `local/captures/`. The two collections are separate. Models and images are excluded from the public archive.
+Private web images and per-profile settings live under `local/web/<profile>/`. The existing desktop S captures remain under `local/captures/`. The two collections are separate. Private images and training checkpoints are excluded from the public archive; explicitly bundled release models can be included.
 
 ### Camera startup diagnostics (0.2.1)
 
@@ -53,9 +55,9 @@ This first version assumes **one cat uses the monitored stations**. Multiple vis
 
 1. Install **Python 3.13** from [python.org](https://www.python.org/downloads/).
 2. Extract this project and double-click **`start_windows.bat`**.
-3. The first launch installs dependencies. The first detector load downloads pretrained weights.
+3. The first launch installs dependencies. A release with an included shared detector loads it locally. A source-only installation without release weights downloads a starter detector on its first load.
 4. Paste the complete local RTSP URL into the connection dialog. It displays masked characters; the **Paste** button and **Show URL** checkbox make input easy to check.
-5. Enter a cat name. Start with the fast `yolo26n.pt` model and processor `auto`.
+5. Enter a cat name. Keep the current detector and processor `auto`.
 6. Select the three station areas. Enter confirms each rectangle; C skips a station that is not visible.
 7. Leave the zones empty for 8 seconds so the counters can arm.
 
@@ -116,18 +118,18 @@ This is an observational prototype. Compare at least 10 manually observed visits
 - The application pulls camera video as a client. Browser mode also runs an authenticated HTTP engine bound to loopback only. It does not change router settings or expose an inbound camera service to the network.
 - Video is not recorded or uploaded. Desktop images are saved when S is pressed. Browser images are saved when imported or when the user enables automatic collection. Capture and training files stay under `local/`.
 - Ultralytics analytics and crash reporting are disabled via `sync=False`. OpenCV/FFmpeg camera logging is suppressed to reduce URL exposure.
-- Package installation and the initial pretrained-weight download require internet. Inference and the app's measurement storage run locally.
+- Package installation requires internet. Source-only installations without included weights also download a starter detector. Inference and the app's measurement storage run locally.
 - Authentication such as Digest protects login; ordinary RTSP does not necessarily encrypt the video. Keep the camera on your trusted local network and maintain its firmware and authentication settings.
 
 These controls reduce exposure; they do not audit the camera firmware or the router's existing configuration.
 
 ## Improve cat detection
 
-The default detector is pretrained on COCO, which already includes cats. For a scene where it fails, use varied, **manually reviewed** examples from actual cameras: different coats, distances, poses, daylight, infrared, partial occlusion, empty stations, dogs, and objects that create false positives.
+The developer trains one shared detector from the currently selected checkpoint. For scenes where it fails, collect varied, **manually reviewed** examples from actual cameras: different coats, distances, poses, daylight, infrared, partial occlusion, empty stations, dogs, and objects that create false positives. A fresh source-only installation can use a COCO-pretrained starter, which already includes cats.
 
-The project includes frame review, manual labeling, session-based dataset preparation, and local fine-tuning. See [docs/TRAINING.md](docs/TRAINING.md), including its infrared-camera guidance. No newly trained detector is bundled: custom training requires your labeled images.
+The project includes developer frame review, manual labeling, session-based dataset preparation, and local fine-tuning. See [docs/SHARED_MODEL.md](docs/SHARED_MODEL.md) for the release workflow and [docs/TRAINING.md](docs/TRAINING.md) for labeling and infrared-camera guidance. This source update has no newly trained detector weights; end users receive the developer's evaluated model in a completed release.
 
-For a public model, collect diverse cats and cameras with permission. A Mila-only fine-tune may help Mila while reducing performance on other cats; keep the generic model as the default until it wins on diverse held-out sessions.
+For a public model, collect diverse cats and cameras with permission. A Mila-only fine-tune may help Mila while reducing performance on other cats. Keep the working baseline privately and evaluate diverse unseen recordings before selecting the shared release detector.
 
 ## Other desktop platforms
 
@@ -143,9 +145,15 @@ python -m unittest discover -s tests -v
 
 The optional simulated-monitor integration test uses NumPy and mocks the camera and detector. The real camera, detection quality, CUDA, installer, and native GUI must still be checked on the target machine.
 
+## Shared detector for distribution
+
+Use the current trained detector as the next training base. The web laboratory shows one selected detector, keeps evaluation session assignments stable, compares old and new cat-only checkpoints, and can include the selected detector in `assets/detector/`. New user installations automatically load that included model. See [the shared model workflow](docs/SHARED_MODEL.md).
+
+A developer release needs real evaluated weights. This source ZIP contains the workflow, not the private Mila dataset or a newly trained shared detector. Test other cats and cameras before making general accuracy claims. End users do not need to label or train.
+
 ## Publish to GitHub
 
-Keep the project source and documentation public. `local/`, `.venv/`, weights, databases, videos, and CSV files are ignored. The repository contains no real camera URL or credentials.
+Keep the project source and documentation public. `local/`, `.venv/`, private weights, databases, videos, and CSV files are ignored. Explicitly bundled release weights under `assets/detector/` and `assets/behavior/` are allowed and checked against their manifests. The repository contains no real camera URL or credentials.
 
 ```powershell
 git init

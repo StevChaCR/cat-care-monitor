@@ -44,7 +44,7 @@ def connect_dialog():
     variables = {}
     for row, (key, title, choices) in enumerate([
         ("cat_label", "Cat name", None),
-        ("model", "Detector", ["yolo26n.pt", "yolo26s.pt"]),
+        ("model", "Current detector", [saved["model"]]),
         ("device", "Processor", ["auto", "cpu", "0"]),
         ("image_size", "Image size", [640, 960, 1280, 1920]),
         ("confidence", "Confidence", None),
@@ -70,7 +70,7 @@ def connect_dialog():
     def connect():
         try:
             source = validate_rtsp(url.get())
-            values = {key: variable.get() for key, variable in variables.items()}
+            values = {**saved, **{key: variable.get() for key, variable in variables.items()}}
             values.update(crop=crop.get(), zones=saved["zones"])
             values = validate_settings(values)
             changed_profile = values["cat_label"] != saved["cat_label"]

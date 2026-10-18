@@ -30,6 +30,7 @@ class Prediction:
     detections: tuple
     fps: float
     tracks: tuple = ()
+    processing_ms: float = 0.
 
 
 class LatestDetector:
@@ -69,6 +70,11 @@ class LatestDetector:
         with self._lock:
             self._show_all = enabled
 
+    def set_image_size(self, size):
+        """Apply a new input size at the next inference boundary."""
+        with self._lock:
+            self.config["image_size"] = size
+
     def _run(self):
         last_sequence = None
         rate = FrameRate()
@@ -88,17 +94,23 @@ class LatestDetector:
                 x1, y1, x2, y2 = processing_crop(rectangles, frame.shape, self.config["crop"])
                 with self._lock:
                     classes = None if self._show_all else self.cat_ids
+                    image_size = self.config["image_size"]
                 # This is the only thread that calls or mutates this model.
+                started_at = time.monotonic()
                 result = self.model.track(frame[y1:y2, x1:x2], classes=classes,
-                    conf=min(.05, self.config["confidence"] / 2), imgsz=self.config["image_size"],
+                    conf=min(.05, self.config["confidence"] / 2), imgsz=image_size,
                     device=self.device, verbose=False, persist=True,
                     tracker=str(self._tracker_path))[0]
                 detections = []
                 observed_tracks = []
                 boxes = result.boxes
-                ids = boxes.id.cpu().tolist() if boxes.id is not None else [None] * len(boxes.conf.cpu().tolist())
-                for box, score, class_id, track_id in zip(boxes.xyxy.cpu().tolist(),
-                        boxes.conf.cpu().tolist(), boxes.cls.cpu().tolist(), ids):
+                # Transfer the box table once instead of synchronizing CUDA for
+                # each separate coordinate, score, class, and identity tensor.
+                rows = boxes.data.cpu().tolist()
+                for row in rows:
+                    box = row[:4]
+                    track_id = int(row[4]) if boxes.is_track else None
+                    score, class_id = row[-2:]
                     class_id = int(class_id)
                     if track_id is None and score < self.config["confidence"]:
                         continue  # Weak unmatched boxes must not create new visits.
@@ -113,7 +125,8 @@ class LatestDetector:
                 now = time.monotonic()
                 rate.record(now)
                 prediction = Prediction(sequence, timestamp, tuple(frame.shape),
-                                        tuple(detections), rate.value(now), tracks)
+                                        tuple(detections), rate.value(now), tracks,
+                                        (now - started_at) * 1000)
                 with self._lock:
                     self._latest = prediction
         except Exception as error:

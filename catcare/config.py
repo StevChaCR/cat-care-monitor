@@ -29,14 +29,17 @@ DEFAULTS = {"cat_label": "Cat", "model": "yolo26n.pt", "device": "auto",
 
 
 def load_settings():
+    from .models import prefer_shared_detector
     path = LOCAL / "settings.json"
-    if not path.exists():
-        return dict(DEFAULTS)
+    values = dict(DEFAULTS)
     try:
-        values = json.loads(path.read_text(encoding="utf-8"))
-        return {key: values.get(key, default) for key, default in DEFAULTS.items()}
+        if path.exists():
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            values = {key: saved.get(key, default) for key, default in DEFAULTS.items()}
     except (ValueError, OSError, AttributeError):
-        return dict(DEFAULTS)
+        pass
+    values["model"] = prefer_shared_detector(values["model"])
+    return values
 
 
 def validate_settings(values):
@@ -44,7 +47,10 @@ def validate_settings(values):
     if not label or len(label) > 60 or "://" in label or any(ord(c) < 32 for c in label):
         raise ValueError("Use a short cat name, without URLs or control characters.")
     model = values["model"]
-    if model not in ("yolo26n.pt", "yolo26s.pt"):
+    if model == "bundled":
+        from .models import bundled_detector
+        bundled_detector()
+    elif model not in ("yolo26n.pt", "yolo26s.pt"):
         path = Path(model)
         if "://" in model or path.suffix.lower() != ".pt" or not path.is_file():
             raise ValueError("Choose a pretrained model or an existing local .pt file.")

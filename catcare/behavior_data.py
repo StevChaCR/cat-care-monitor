@@ -4,6 +4,7 @@ import json
 import math
 import random
 import re
+import shutil
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -26,6 +27,13 @@ class ClipLibrary:
     def __init__(self, root):
         self.root = Path(root)
         self.lock = threading.RLock()
+
+    @property
+    def trash_root(self):
+        folder = self.root / "trash"
+        if folder.is_symlink():
+            raise ValueError("The behavior trash must be a local folder inside this library.")
+        return folder
 
     def sessions(self):
         with self.lock:
@@ -84,7 +92,7 @@ class ClipLibrary:
             folder = self.session_path(session_id)
             rows = self.clips()
             if len(rows) >= 600:
-                raise ValueError("This profile has reached the 600-clip limit. Export or review its data before collecting more.")
+                raise ValueError("This profile has reached the 600 active clip limit. Move unwanted clips to trash before collecting more.")
             if any(row["sha256"] == digest for row in rows):
                 raise ValueError("This exact clip has already been collected.")
             clip_id = uuid.uuid4().hex
@@ -99,10 +107,78 @@ class ClipLibrary:
             write_json(destination / "clip.json", row)
             return row
 
-    def frame_path(self, key, index):
+    def frame_path(self, key, index, trashed=False):
         if type(index) is not int or not 0 <= index < CLIP_FRAMES:
             raise ValueError("Invalid clip frame index.")
-        return self.clip_path(key) / f"{index:02d}.jpg"
+        folder = self.trashed_path(key) if trashed else self.clip_path(key)
+        return folder / f"{index:02d}.jpg"
+
+    def trashed_path(self, key):
+        if not isinstance(key, str) or not KEY.fullmatch(key):
+            raise ValueError("Invalid behavior clip reference.")
+        folder = self.trash_root / key
+        if folder.is_symlink() or not folder.resolve().is_relative_to(self.trash_root.resolve()):
+            raise ValueError("Invalid behavior trash reference.")
+        if not (folder / "clip.json").is_file():
+            raise ValueError("That clip is not in the trash.")
+        return folder
+
+    def trashed_clips(self):
+        with self.lock:
+            sessions = {row["id"]: row["name"] for row in self.sessions()}
+            result = []
+            for path in sorted(self.trash_root.glob("*/clip.json")):
+                if KEY.fullmatch(path.parent.name):
+                    folder = self.trashed_path(path.parent.name)
+                    row = json.loads((folder / "clip.json").read_text(encoding="utf-8"))
+                    result.append({**row, "session_name": sessions.get(row["session_id"], "Original recording period")})
+            return result
+
+    @staticmethod
+    def _clip_keys(keys):
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 600:
+            raise ValueError("Choose between 1 and 600 behavior clips.")
+        if any(not isinstance(key, str) or not KEY.fullmatch(key) for key in keys) or len(set(keys)) != len(keys):
+            raise ValueError("Invalid behavior clip selection.")
+        return keys
+
+    def move_to_trash(self, keys):
+        with self.lock:
+            keys = self._clip_keys(keys)
+            # Validate the entire selection before moving any folders.
+            sources = [self.clip_path(key) for key in keys]
+            destinations = [self.trash_root / key for key in keys]
+            if any(path.is_symlink() or not path.resolve().is_relative_to(self.root.resolve()) for path in sources):
+                raise ValueError("Invalid behavior clip location.")
+            if any(path.exists() for path in destinations):
+                raise ValueError("A selected clip is already in the trash.")
+            self.trash_root.mkdir(parents=True, exist_ok=True)
+            for source, destination in zip(sources, destinations):
+                source.replace(destination)
+            return len(keys)
+
+    def restore_clip(self, key):
+        with self.lock:
+            source = self.trashed_path(key)
+            session, clip = key.split("_")
+            destination = self.session_path(session) / clip
+            rows = self.clips()
+            if len(rows) >= 600:
+                raise ValueError("The profile already has 600 active clips. Remove clips before restoring more.")
+            if destination.exists():
+                raise ValueError("That clip is already present in the library.")
+            row = json.loads((source / "clip.json").read_text(encoding="utf-8"))
+            if any(item["sha256"] == row["sha256"] for item in rows):
+                raise ValueError("An identical clip is already present in the library.")
+            source.replace(destination)
+
+    def purge_clips(self, keys):
+        with self.lock:
+            sources = [self.trashed_path(key) for key in self._clip_keys(keys)]
+            # Only explicitly selected, previously trashed clips can be erased.
+            for source in sources:
+                shutil.rmtree(source)
+            return len(sources)
 
     def label_clip(self, key, label):
         if label not in (*ACTIVITIES, "exclude"):

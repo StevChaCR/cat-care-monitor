@@ -8,7 +8,7 @@
   const trainingMode = local && document.querySelector('meta[name="catcare-training"]')?.content === 'true';
   const state = { status: null, configLoaded: false, zones: {}, frame: null,
     images: [], sessions: [], galleryUrls: [], label: null, labelImage: null, boxes: [],
-    drawing: null, cameraBusy: false, frameBusy: false, libraryBusy: false };
+    drawing: null, cameraBusy: false, frameBusy: false, libraryBusy: false, bundleBusy: false };
   const names = { overview: 'Overview', camera: 'Camera & zones', library: 'Cat library', training: 'Train detection', behavior: 'Behavior lab' };
   const stationNames = { litter_box: 'Litter box', food: 'Food', water: 'Water' };
   const colors = { litter_box: '#9b7fc1', food: '#d0a45a', water: '#65a3bb' };
@@ -74,16 +74,8 @@
     $('device').value = config.device;
     $('image-size').value = config.image_size;
     $('confidence').value = config.confidence;
-    const modelSelect = $('detector');
-    if (!['yolo26n.pt', 'yolo26s.pt'].includes(config.model)) {
-      const custom = document.createElement('option');
-      custom.value = config.model;
-      custom.textContent = 'Your trained detector';
-      modelSelect.querySelectorAll('[data-custom]').forEach(node => node.remove());
-      custom.dataset.custom = 'true';
-      modelSelect.append(custom);
-    }
-    modelSelect.value = config.model;
+    $('detector').value = config.model === 'bundled' ? 'WatchMyCat shared detector' :
+      ['yolo26n.pt', 'yolo26s.pt'].includes(config.model) ? 'Starter detector · first training' : 'Current trained cat detector';
     state.zones = structuredClone(config.zones || {});
     state.configLoaded = true;
   }
@@ -120,8 +112,26 @@
       'Connect a camera and select zones to begin recording.';
     renderTraining(row.training);
     renderBehavior(row);
+    if (trainingMode) {
+      $('fast-inference').disabled = busy || !local;
+      const ms = row.processing_ms || 0;
+      const lag = row.prediction_at ? Math.max(0, Date.now() / 1000 - row.prediction_at) : 0;
+      $('inference-status').textContent = `${row.processor || 'Waiting for detector'} · AI input ${row.config.image_size} px` +
+        (ms ? ` · ${ms.toFixed(0)} ms per processed frame · latest frame ${lag.toFixed(1)}s old` : '') +
+        (row.processor === 'CPU' && row.running ? '. CPU is active; check GPU compatibility if you expected GPU processing.' : '');
+    }
     drawCamera();
   }
+
+  $('fast-inference').onclick = () => action(async () => {
+    $('fast-inference').disabled = true;
+    try {
+      await api('/api/performance', { image_size: 640 });
+      state.configLoaded = false;
+      renderStatus(await (await api('/api/status')).json());
+      toast('Your current detector is now using a 640 px AI input. Check that small or distant cats remain visible.');
+    } finally { $('fast-inference').disabled = false; }
+  });
 
   async function poll() {
     if (!local) return;
@@ -156,12 +166,11 @@
       try {
         const config = { cat_label: $('cat-name').value, device: $('device').value,
           image_size: Number($('image-size').value), confidence: Number($('confidence').value) };
-        if (['yolo26n.pt', 'yolo26s.pt'].includes($('detector').value)) config.model = $('detector').value;
         await api('/api/settings', config);
         await api('/api/connect', { url: $('rtsp').value.trim() });
         $('rtsp').value = ''; // Credentials live only in the running camera process.
         state.configLoaded = false;
-        toast('Connecting locally. The first run may download detector weights.');
+        toast(state.status?.config.model === 'bundled' ? 'Connecting locally with the included shared detector.' : 'Connecting locally with the current detector.');
       } finally { state.cameraBusy = false; }
     });
   };
@@ -428,9 +437,12 @@
     $('training-phase').textContent = { idle: 'Not started', preparing: 'Preparing dataset', training: 'Training locally',
       evaluating: 'Evaluating test sessions', completed: 'Trained and evaluated', failed: 'Run stopped', cancelled: 'Cancelled' }[phase] || phase;
     $('training-message').textContent = job.message || (phase === 'completed' ?
-      'Review the held-out test results and compare real camera visits before replacing your current detector.' :
+      'Compare the previous and candidate detector on held-out images, then test real recordings before selecting or packaging it.' :
       busy ? 'Your computer is doing the work. Keep the local engine running.' :
-      'Review all images from at least 3 independent recording sessions to begin.');
+      'Continue from the current detector using reviewed examples from varied cats and cameras. Training, validation, and test sessions stay separate.');
+    $('detector-current').textContent = state.status?.detector_name || 'Current detector';
+    $('bundle-detector').disabled = !local || state.bundleBusy || busy || !!state.status?.running ||
+      ['preparing', 'training', 'evaluating'].includes(state.status?.behavior_training?.phase);
     $('training-epoch').textContent = job.epoch ? `Epoch ${job.epoch} / ${job.epochs}` : '—';
     $('training-progress').style.width = `${phase === 'completed' ? 100 : Math.min(95, 95 * (job.epoch || 0) / (job.epochs || 60))}%`;
     $('train-button').disabled = !local || busy || !!state.status?.running || ['preparing', 'training', 'evaluating'].includes(state.status?.behavior_training?.phase);
@@ -446,11 +458,27 @@
         const value = document.createElement('strong'); value.textContent = `${((job[key] || 0) * 100).toFixed(1)}%`;
         panel.append(small, value); $('training-results').append(panel);
       }
+      if (job.baseline) {
+        const table = document.createElement('table'); table.className = 'detector-comparison';
+        const caption = document.createElement('caption'); caption.textContent = 'Same held-out image set · previous detector vs candidate';
+        const head = table.createTHead().insertRow();
+        for (const title of ['Metric', 'Previous', 'Candidate', 'Change']) {
+          const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = title; head.append(cell);
+        }
+        const body = table.createTBody();
+        for (const [label, key] of [['Precision', 'precision'], ['Recall', 'recall'], ['mAP50', 'mAP50'], ['mAP50–95', 'mAP50_95']]) {
+          const line = body.insertRow();
+          const delta = ((job[key] - job.baseline[key]) * 100);
+          for (const value of [label, `${(job.baseline[key] * 100).toFixed(1)}%`, `${(job[key] * 100).toFixed(1)}%`, `${delta >= 0 ? '+' : ''}${delta.toFixed(1)} pp`])
+            line.insertCell().textContent = value;
+        }
+        table.prepend(caption); $('training-results').append(table);
+      }
     }
   }
   $('train-button').onclick = () => action(async () => {
     await api('/api/train', { epochs: Number($('epochs').value) });
-    toast('Local training started. The previous detector remains selected.');
+    toast('Training a new candidate from the current detector. The active weights remain selected.');
   });
   $('cancel-training').onclick = () => action(async () => {
     await api('/api/train/cancel', {}); toast('Training cancelled.');
@@ -459,14 +487,54 @@
     await api('/api/train/activate', {}); state.configLoaded = false;
     toast('Trained detector selected. Connect the camera to evaluate its real behavior.');
   });
+  $('bundle-detector').onclick = () => action(async () => {
+    if (state.bundleBusy) return;
+    state.bundleBusy = true;
+    $('bundle-detector').disabled = true;
+    try {
+      const row = await (await api('/api/train/bundle', {})).json();
+      $('detector-release-note').textContent = `Shared detector ${row.version} included in assets/detector. New installations load it automatically. Existing custom weights remain selected in this workspace.`;
+      toast('Selected detector included in the release. Private training photos were not copied.');
+    } finally { state.bundleBusy = false; $('bundle-detector').disabled = false; }
+  });
   $('export-button').onclick = () => action(async () => {
     const url = URL.createObjectURL(await (await api('/api/report.csv')).blob());
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'cat-care-visits.csv';
     anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
-  const behavior = { clips: [], sessions: [], urls: [], busy: false, clip: null, frames: [],
-    index: 0, playing: false, timer: null, generation: 0, captured: -1, saving: false };
+  const behavior = { clips: [], trash: [], sessions: [], urls: [], busy: false, clip: null, frames: [],
+    index: 0, playing: false, timer: null, generation: 0, captured: -1, saving: false,
+    mutating: false, collectBusy: false, refreshPending: false, limit: 60 };
   const activityNames = { eating: 'Eating', drinking: 'Drinking', other: 'Other', exclude: 'Cannot tell' };
+
+  function behaviorEditingLocked() {
+    return behavior.mutating || behavior.saving || [state.status?.training, state.status?.behavior_training]
+      .some(job => ['preparing', 'training', 'evaluating'].includes(job?.phase));
+  }
+  function filteredBehaviorClips() {
+    const filter = $('behavior-filter').value;
+    const station = $('behavior-station-filter').value;
+    return (filter === 'trash' ? behavior.trash : behavior.clips).filter(clip =>
+      (station === 'both' || clip.station === station) &&
+      (['all', 'trash'].includes(filter) || (filter === 'unreviewed' ? clip.label === null : clip.label === filter)));
+  }
+  function updateBehaviorCleanup() {
+    const locked = !trainingMode || behaviorEditingLocked();
+    const excluded = filteredBehaviorClips().filter(clip => !clip.trashed && clip.label === 'exclude');
+    $('behavior-trash-excluded').disabled = locked || !excluded.length;
+    $('behavior-trash-excluded').textContent = `Move Cannot tell to trash (${excluded.length})`;
+    $('behavior-empty-trash').disabled = locked || !behavior.trash.length;
+    $('behavior-empty-trash').textContent = `Empty trash (${Math.min(600, behavior.trash.length)})`;
+    $('behavior-trash-clip').hidden = !behavior.clip || !!behavior.clip.trashed;
+    $('behavior-restore-clip').hidden = !behavior.clip?.trashed;
+    $('behavior-trash-clip').disabled = $('behavior-restore-clip').disabled = locked;
+    document.querySelectorAll('[data-clip-action]').forEach(button => { button.disabled = locked; });
+    document.querySelectorAll('[data-behavior-label]').forEach(button => {
+      button.hidden = !!behavior.clip?.trashed;
+      button.disabled = locked || !behavior.frames.length;
+    });
+  }
+  const behaviorFrameUrl = (clip, index) => `/api/behavior/frame/${clip.id}/${index}${clip.trashed ? '?trash=1' : ''}`;
 
   function renderBehavior(row) {
     const status = row.behavior || {};
@@ -492,9 +560,17 @@
     }
     $('activity-export').disabled = !local || !status.summary;
     if (!trainingMode) return;
-    $('behavior-collect').disabled = !row.running || busy || detectorBusy;
+    $('behavior-collect').disabled = !row.running || busy || detectorBusy || behavior.collectBusy;
     $('behavior-collect').textContent = status.collecting ? 'Stop collecting clips' : 'Collect behavior clips';
-    $('behavior-collection-note').textContent = `${status.captured || 0} clips saved this camera run. ${status.note || 'Captures cropped station sequences, including empty scenes. Review every clip.'}`;
+    $('behavior-capture-station').disabled = !local || status.collecting || behavior.collectBusy || busy || detectorBusy;
+    $('behavior-session').disabled = !local || status.collecting || behavior.collectBusy || busy || detectorBusy;
+    $('behavior-new-session').disabled = !local || status.collecting || behavior.collectBusy || busy || detectorBusy;
+    for (const option of $('behavior-capture-station').options) {
+      option.disabled = option.value === 'both' ? !row.config.zones.food && !row.config.zones.water : !row.config.zones[option.value];
+    }
+    if (status.collecting) $('behavior-capture-station').value = status.collection_stations?.length === 1 ? status.collection_stations[0] : 'both';
+    const areas = status.collecting ? `Collecting: ${(status.collection_stations || []).map(station => stationNames[station]).join(' + ')}. ` : '';
+    $('behavior-collection-note').textContent = `${areas}${status.captured || 0} clips saved this camera run. ${status.note || 'Captures cropped station sequences, including empty scenes. Review every clip.'}`;
     $('behavior-phase').textContent = job.phase === 'idle' ? 'Not started' : job.phase;
     $('behavior-training-message').textContent = job.message || (job.phase === 'completed' ?
       'Review test clips and validate complete unseen recordings before including this candidate in a release.' :
@@ -520,50 +596,100 @@
     }
     if (behavior.captured !== (status.captured || 0) && location.hash === '#behavior') action(refreshBehaviorLibrary);
     behavior.captured = status.captured || 0;
+    updateBehaviorCleanup();
   }
 
   async function refreshBehaviorLibrary() {
-    if (!trainingMode || behavior.busy) return;
+    if (!trainingMode) return;
+    if (behavior.busy) { behavior.refreshPending = true; return; }
     behavior.busy = true;
+    $('behavior-more').disabled = true;
     try {
       const data = await (await api('/api/behavior/library')).json();
-      behavior.clips = data.clips; behavior.sessions = data.sessions;
+      behavior.clips = data.clips.map(clip => ({ ...clip, trashed: false })).sort((a, b) => a.timestamps[0] - b.timestamps[0]);
+      behavior.trash = (data.trash || []).map(clip => ({ ...clip, trashed: true })).sort((a, b) => a.timestamps[0] - b.timestamps[0]);
+      behavior.sessions = data.sessions;
       const selected = $('behavior-session').value;
       $('behavior-session').replaceChildren(new Option('Choose a real recording period', ''));
       for (const session of data.sessions) $('behavior-session').add(new Option(session.name, session.id));
       $('behavior-session').value = data.sessions.some(session => session.id === selected) ? selected : data.sessions.at(-1)?.id || '';
       const reviewed = data.clips.filter(clip => clip.label !== null).length;
-      $('behavior-stats').textContent = `${data.clips.length} clips · ${reviewed} reviewed · ${data.sessions.length} periods · showing up to 60`;
       behavior.urls.forEach(URL.revokeObjectURL); behavior.urls = [];
       $('behavior-clips').replaceChildren();
-      const filter = $('behavior-filter').value;
-      const clips = data.clips.filter(clip => filter === 'all' || (filter === 'unreviewed' ? clip.label === null : clip.label === filter)).slice(-60).reverse();
+      const matches = filteredBehaviorClips();
+      const clips = matches.slice(-behavior.limit).reverse();
+      $('behavior-stats').textContent = `${data.clips.length} active · ${reviewed} reviewed · ${behavior.trash.length} in trash · showing ${clips.length} / ${matches.length} matching clips`;
+      $('behavior-more').hidden = matches.length <= behavior.limit;
+      updateBehaviorCleanup();
       if (!clips.length) {
         const text = document.createElement('p'); text.textContent = 'No clips match this filter. Collect a recording period or choose All clips.';
         $('behavior-clips').append(text);
       }
       for (const clip of clips) {
+        const card = document.createElement('div'); card.className = 'behavior-clip-card';
         const button = document.createElement('button'); button.type = 'button'; button.className = 'photo-card';
         const image = document.createElement('img'); image.alt = `Review ${stationNames[clip.station]} clip`; image.loading = 'lazy';
         const label = document.createElement('span'); label.textContent = `${activityNames[clip.label] || 'Review'} · ${stationNames[clip.station]} · ${clip.duration.toFixed(1)}s`;
         button.append(image, label); button.onclick = () => action(() => openBehaviorClip(clip));
-        $('behavior-clips').append(button);
-        const url = URL.createObjectURL(await (await api(`/api/behavior/frame/${clip.id}/0`)).blob());
-        behavior.urls.push(url); image.src = url;
+        const manage = document.createElement('button'); manage.type = 'button';
+        manage.className = 'button small'; manage.dataset.clipAction = clip.trashed ? 'restore' : 'trash';
+        manage.textContent = clip.trashed ? 'Restore clip' : 'Move to trash'; manage.disabled = behaviorEditingLocked();
+        manage.setAttribute('aria-label', `${manage.textContent}: ${stationNames[clip.station]} clip from ${clip.session_name}`);
+        manage.onclick = () => action(() => changeBehaviorClips(manage.dataset.clipAction, [clip.id]));
+        card.append(button, manage); $('behavior-clips').append(card);
+        try {
+          const url = URL.createObjectURL(await (await api(behaviorFrameUrl(clip, 0))).blob());
+          behavior.urls.push(url); image.src = url;
+        } catch { image.alt = 'Preview unavailable. Open the clip or move it to trash.'; }
       }
-    } finally { behavior.busy = false; }
+    } finally {
+      behavior.busy = false; $('behavior-more').disabled = false; updateBehaviorCleanup();
+      if (behavior.refreshPending) { behavior.refreshPending = false; action(refreshBehaviorLibrary); }
+    }
   }
-  $('behavior-filter').onchange = () => action(refreshBehaviorLibrary);
+  for (const id of ['behavior-filter', 'behavior-station-filter']) {
+    $(id).onchange = () => { behavior.limit = 60; action(refreshBehaviorLibrary); };
+  }
   $('behavior-refresh').onclick = () => action(refreshBehaviorLibrary);
+  $('behavior-more').onclick = () => { behavior.limit += 60; action(refreshBehaviorLibrary); };
+  async function changeBehaviorClips(operation, ids) {
+    if (behaviorEditingLocked()) throw new Error('Wait for training or the current action to finish.');
+    behavior.mutating = true; updateBehaviorCleanup();
+    try {
+      await api(`/api/behavior/clips/${operation}`, { ids });
+      if (behavior.clip && ids.includes(behavior.clip.id)) $('behavior-dialog').close();
+      await refreshBehaviorLibrary();
+      toast(operation === 'trash' ? `${ids.length} clip(s) moved to trash. Choose Show → Trash to restore them.` :
+        operation === 'restore' ? 'Clip restored with its original recording period and label.' : `${ids.length} trashed clip(s) permanently deleted.`);
+    } finally { behavior.mutating = false; updateBehaviorCleanup(); }
+  }
+  $('behavior-trash-excluded').onclick = () => action(async () => {
+    const ids = filteredBehaviorClips().filter(clip => !clip.trashed && clip.label === 'exclude').map(clip => clip.id);
+    if (ids.length) await changeBehaviorClips('trash', ids);
+  });
+  $('behavior-empty-trash').onclick = () => action(async () => {
+    const ids = behavior.trash.slice(-600).map(clip => clip.id);
+    if (!ids.length || !confirm(`Permanently delete these ${ids.length} trashed clips and their frames? This cannot be undone. Active clips and trained models are kept.`)) return;
+    await changeBehaviorClips('purge', ids);
+  });
   $('behavior-new-session').onclick = () => action(async () => {
     const session = await (await api('/api/behavior/sessions', { name: $('behavior-session-name').value })).json();
     $('behavior-session-name').value = ''; await refreshBehaviorLibrary(); $('behavior-session').value = session.id;
   });
   $('behavior-collect').onclick = () => action(async () => {
+    if (behavior.collectBusy) return;
     const enabled = !state.status?.behavior?.collecting;
     if (enabled && !$('behavior-session').value) throw new Error('Create or choose the real recording period first.');
-    await api('/api/behavior/collect', { enabled, session: $('behavior-session').value });
-    toast(enabled ? 'Collecting station clips locally. Labels remain unreviewed.' : 'Clip collection stopped.');
+    const station = $('behavior-capture-station').value;
+    behavior.collectBusy = true; if (state.status) renderBehavior(state.status);
+    try {
+      await api('/api/behavior/collect', { enabled, session: $('behavior-session').value, station });
+      if (state.status?.behavior) {
+        state.status.behavior.collecting = enabled;
+        state.status.behavior.collection_stations = enabled ? station === 'both' ? ['food', 'water'].filter(name => state.status.config.zones[name]) : [station] : [];
+      }
+      toast(enabled ? `Collecting ${station === 'both' ? 'configured station' : stationNames[station]} clips locally. Labels remain unreviewed.` : 'Clip collection stopped.');
+    } finally { behavior.collectBusy = false; if (state.status) renderBehavior(state.status); }
   });
   function stopBehaviorPlayback() {
     clearTimeout(behavior.timer); behavior.timer = null; behavior.playing = false;
@@ -586,40 +712,54 @@
   async function openBehaviorClip(clip) {
     stopBehaviorPlayback(); behavior.generation += 1; const generation = behavior.generation;
     behavior.frames.forEach(frame => frame.close()); behavior.frames = []; behavior.clip = clip; behavior.index = 0;
+    updateBehaviorCleanup();
     $('behavior-clip-description').textContent = `${clip.session_name} · ${stationNames[clip.station]} · loading…`;
     if (!$('behavior-dialog').open) $('behavior-dialog').showModal();
     const frames = [];
     try {
       for (let start = 0; start < clip.frames; start += 4) {
         const chunk = await Promise.allSettled(Array.from({ length: Math.min(4, clip.frames - start) }, async (_, offset) =>
-          createImageBitmap(await (await api(`/api/behavior/frame/${clip.id}/${start + offset}`)).blob())));
+          createImageBitmap(await (await api(behaviorFrameUrl(clip, start + offset))).blob())));
         for (const item of chunk) if (item.status === 'fulfilled') frames.push(item.value);
         const failed = chunk.find(item => item.status === 'rejected');
         if (failed) throw failed.reason;
       }
-    } catch (error) { frames.forEach(frame => frame.close()); throw error; }
+    } catch (error) {
+      frames.forEach(frame => frame.close());
+      if (generation !== behavior.generation || !$('behavior-dialog').open) return;
+      $('behavior-clip-description').textContent = `${clip.session_name} · Preview could not be loaded. You can still move a damaged clip to trash.`;
+      throw error;
+    }
     if (generation !== behavior.generation || !$('behavior-dialog').open) { frames.forEach(frame => frame.close()); return; }
     behavior.frames = frames; behavior.playing = true;
+    updateBehaviorCleanup();
     $('behavior-clip-description').textContent = `${clip.session_name} · ${stationNames[clip.station]} · ${clip.duration.toFixed(1)} seconds · ${activityNames[clip.label] || 'Not reviewed'}`;
     playBehavior();
   }
   $('behavior-close').onclick = () => $('behavior-dialog').close();
   $('behavior-dialog').addEventListener('close', () => {
-    stopBehaviorPlayback(); behavior.generation += 1; behavior.frames.forEach(frame => frame.close()); behavior.frames = [];
+    stopBehaviorPlayback(); behavior.generation += 1; behavior.frames.forEach(frame => frame.close()); behavior.frames = []; behavior.clip = null;
   });
   $('behavior-play').onclick = () => { if (!behavior.frames.length) return; const playing = behavior.playing; stopBehaviorPlayback(); behavior.playing = !playing; playBehavior(); };
   $('behavior-scrub').oninput = () => { stopBehaviorPlayback(); behavior.index = Number($('behavior-scrub').value); drawBehaviorFrame(); };
   async function saveBehaviorLabel(label) {
-    if (behavior.saving || !behavior.clip || !behavior.frames.length) return;
+    if (behaviorEditingLocked() || !behavior.clip || behavior.clip.trashed || !behavior.frames.length) return;
     behavior.saving = true;
+    updateBehaviorCleanup();
     try {
       const key = behavior.clip.id;
       await api('/api/behavior/labels', { id: key, label });
       $('behavior-dialog').close(); await refreshBehaviorLibrary();
       const next = behavior.clips.find(clip => clip.label === null && clip.id !== key);
       if (next) await openBehaviorClip(next);
-    } finally { behavior.saving = false; }
+    } finally { behavior.saving = false; updateBehaviorCleanup(); }
   }
+  $('behavior-trash-clip').onclick = () => action(async () => {
+    if (behavior.clip && !behavior.clip.trashed) await changeBehaviorClips('trash', [behavior.clip.id]);
+  });
+  $('behavior-restore-clip').onclick = () => action(async () => {
+    if (behavior.clip?.trashed) await changeBehaviorClips('restore', [behavior.clip.id]);
+  });
   document.querySelectorAll('[data-behavior-label]').forEach(button => {
     button.onclick = () => action(() => saveBehaviorLabel(button.dataset.behaviorLabel));
   });

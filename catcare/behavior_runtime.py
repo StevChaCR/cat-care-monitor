@@ -96,6 +96,8 @@ class BehaviorService:
         self.visible = {station: False for station in self.counters}
         self.latest_prediction_at = 0.
         self.capture_session = None
+        self.capture_key = None
+        self.capture_stations = ()
         self.captured = 0
         self.note = ""
         self._summary = None
@@ -123,17 +125,24 @@ class BehaviorService:
             else:
                 self.visible[station] = True
 
-    def observe_frame(self, sequence, timestamp, frame, capture_session=None):
+    def observe_frame(self, sequence, timestamp, frame, capture_session=None, capture_stations=None, capture_id=None):
         if sequence == self.last_frame:
             return
         self.last_frame = sequence
-        if self.capture_session != capture_session:
+        selected = tuple(station for station in self.counters
+                         if capture_stations is None or station in capture_stations) if capture_session else ()
+        capture_key = (capture_session, selected, capture_id)
+        if self.capture_key != capture_key:
             for buffer in self.buffers.values():
                 buffer.clear()
+            for station in selected:
+                self.last_saved[station] = 0.
         self.capture_session = capture_session
+        self.capture_stations = selected
+        self.capture_key = capture_key
         rectangles = pixel_zones(self.config["zones"], frame.shape[1], frame.shape[0])
         for station in self.counters:
-            capturing = capture_session is not None and self.captured < 120
+            capturing = capture_session is not None and station in selected and self.captured < 120
             recognizing = self.worker is not None and self.visible[station] and timestamp - self.latest_prediction_at <= 2
             if not capturing and not recognizing:
                 self.buffers[station].clear()
@@ -202,7 +211,8 @@ class BehaviorService:
             self._summary_at = now
         return {"phase": phase, "error": error, "stations": dict(self.station_states),
                 "summary": self._summary, "captured": self.captured,
-                "note": self.note, "collecting": self.capture_session is not None and self.captured < 120}
+                "note": self.note, "collecting": self.capture_session is not None and self.captured < 120,
+                "collection_stations": list(self.capture_stations)}
 
     def interrupt(self):
         for station, counter in self.counters.items():

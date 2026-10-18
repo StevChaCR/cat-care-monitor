@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .config import ROOT
 from .dataset import prepare_dataset
+from .models import STARTER_MODELS, resolve_detector
 
 
 class TrainingJob:
@@ -50,14 +51,23 @@ class TrainingJob:
             if not isinstance(epochs, int) or not 5 <= epochs <= 200:
                 raise ValueError("Choose between 5 and 200 training epochs.")
             folder = Path(profile) / "training" / uuid.uuid4().hex
+            selected = resolve_detector(model).resolve()
+            inherited = None
+            for parent in selected.parents:
+                if parent.parent == (Path(profile) / "training").resolve():
+                    candidate = parent / "dataset" / "split_manifest.json"
+                    if candidate.is_file():
+                        inherited = candidate
+                    break
             # Validation happens before a child is launched. Incomplete labels and
             # neighboring frames split across fake sessions are not training data.
-            prepare_dataset(images, folder / "dataset")
+            prepare_dataset(images, folder / "dataset", split_file=Path(profile) / "detector_split.json",
+                            inherit_manifest=inherited)
             self.folder, self.weights, self.phase = folder, None, "preparing"
             progress = folder / "progress.json"
             progress.write_text(json.dumps({"phase": "preparing", "epoch": 0, "epochs": epochs}), encoding="utf-8")
             command = [sys.executable, str(ROOT / "tools" / "train_detector.py"),
-                       "--data", str(folder / "dataset" / "data.yaml"), "--model", model,
+                       "--data", str(folder / "dataset" / "data.yaml"), "--model", model if model in STARTER_MODELS else str(selected),
                        "--epochs", str(epochs), "--imgsz", str(image_size), "--batch", "2",
                        "--device", device, "--project", str(folder / "runs"),
                        "--progress-file", str(progress)]

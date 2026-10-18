@@ -21,11 +21,37 @@ The laboratory flag is a product separation, not an account-authentication syste
 1. Launch the training mode and keep your existing cat profile. Existing photos, reviewed boxes, chosen detector, zones, and visit database remain in `local/`.
 2. Fix the camera position. Configure food and water zones with enough space to see the cat's head and the rim of the bowl. Keep the stations separate. A hidden or tiny head cannot reliably establish an action.
 3. Open **Behavior lab** and create a session for one real recording period, for example `Camera A - Monday evening`. Connect the camera and enable clip collection. This is explicitly opt-in.
-4. Each stored sequence contains 16 JPEG frames sampled near 4 FPS, cropped around a station with context. Both stations are sampled independently of YOLO, so missed cats, resting animals, and empty scenes can be reviewed too. No audio or RTSP credentials are stored. Collection is limited to 120 clips per camera run and 600 per profile.
+4. Choose **Collection area → Water only**, **Food only**, or **Both configured stations**, then press **Collect behavior clips**. Stop collection before switching areas. Reuse the same session when switching areas during the same real recording period. Each stored sequence contains 16 JPEG frames sampled near 4 FPS, cropped around the selected station with context. Stations are sampled independently of YOLO, so missed cats, resting animals, and empty scenes can be reviewed too. No audio or RTSP credentials are stored. Collection is limited to 120 clips per camera run and 600 active clips per profile.
 5. Review each clip as a sequence. Use **E** for eating, **D** for drinking, **O** for other activity, or **X** for cannot tell. Other must include sniffing, sitting, lying beside the bowl, grooming, walking past, and empty scenes. Exclude occlusions, multiple cats, transitions between activities, or ambiguous clips rather than guessing a label.
 6. Use independent real periods for training, validation, and testing. A new session name or a reconnection does not make adjacent footage independent. The helper rejects overlapping source time ranges and duplicate clips. Each split must contain all three activities and Other examples from both stations. At least three examples of each class are required in training and one per class in validation and test; these are software minimums, not an adequate-data guarantee.
 
+## Collect a specific station
+
+To focus on drinking examples, keep the camera connected, choose the real recording period, select **Water only**, and start collection. Stop when the useful moment ends. For food, repeat with **Food only**. Leave both station zones configured; the selection changes only which clips are saved, while monitoring continues for both stations.
+
+The selector chooses a camera area, not a known action. A water crop may show drinking, sniffing, resting, or an empty bowl. Clips remain unreviewed until you label them **Drinking**, **Eating**, **Other**, or **Cannot tell**. Keep useful Other examples at both stations; a model trained only on positive examples cannot reliably distinguish a visit from the activity. Collection begins a fresh sequence after each start or area change, and never labels clips from their station alone.
+
+## Remove bad recordings
+
+1. In **Review behavior clips**, filter by activity and **Station**. Choose **All clips** to include previously reviewed clips. Use **Show 60 more clips** to reach older recordings.
+2. Click **Move to trash** on a card or inside its review dialog. The clip leaves the active library and future training datasets, while its original frames, label, and recording period remain recoverable. Even a clip with an unreadable preview can be moved to trash.
+3. To clean up rejected clips in a batch, choose **Cannot tell** and the desired station, then click **Move Cannot tell to trash**. This moves only rejected clips matching the current filters.
+4. Choose **Show → Trash** to review removed clips and use **Restore clip**. Restoring preserves the original label; a restored Cannot tell clip remains excluded until you review it again.
+5. To reclaim disk space, click **Empty trash** and confirm the displayed count. This permanently deletes up to 600 explicitly listed trash clips per action and cannot be undone. Clips added to trash after that selection are not included.
+
+**Cannot tell** alone excludes a clip from training but keeps its files. Moving to trash is recoverable and does not free disk space until the trash is emptied. Trash lives under `local/web/<profile>/behavior/sessions/trash/` and is ignored by dataset preparation. Active clip capacity excludes trash. Existing trained weights and visit/activity records are not changed by cleanup; removing source clips affects future dataset preparation. Clip changes are blocked while a training job runs.
+
 For a shared product, collect consented examples from multiple cats and cameras in the developer workspace and label their separate recording periods clearly. Hold out entire cameras/cats as well as days when assessing generalization. The current automatic split keeps recording periods together; it does **not** automatically certify independence by animal or camera identity. Do not present a random frame split or same-camera result as proof of broad compatibility.
+
+## Inference performance
+
+In **Camera & zones**, **Use faster AI · 640 px** applies a 640-pixel inference input immediately, including while the camera is connected. It retains the selected custom detector. The complete preview and station clip crops retain their framing. Existing installations keep their selected input size until this button or the setup form changes it.
+
+The panel shows the actual processor, input size, processing milliseconds per frame, and latest prediction age. A 640 input processes substantially fewer pixels than 960 or 1920, but small or distant cats may become harder to detect. Compare real missed detections before keeping the setting. There is no guaranteed FPS improvement on an untested computer. Training on 98 images does not require running inference at the training image size.
+
+The detector transfers its box table from the GPU once per inference instead of requesting each field separately. Camera capture still keeps only the latest frame and detection remains asynchronous. Fractional measured frame rates below 0.5 FPS are now displayed rather than rounding the sample history down to zero. This release does not force FP16 on older GPUs, install CUDA, export TensorRT, or replace a custom detector with a generic model. If CPU is displayed, GPU acceleration is not being used; inspect the existing diagnostics before changing dependencies.
+
+Inference settings: [Ultralytics prediction arguments](https://docs.ultralytics.com/modes/predict/).
 
 ## Local training
 

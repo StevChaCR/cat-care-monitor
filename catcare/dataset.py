@@ -30,7 +30,7 @@ def read_labels(path):
     return rows
 
 
-def prepare_dataset(source, output, seed=42):
+def prepare_dataset(source, output, seed=42, split_file=None, inherit_manifest=None):
     source, output = Path(source), Path(output)
     if output.exists() and any(output.iterdir()):
         raise ValueError("Output already contains data. Choose a new --output directory.")
@@ -60,14 +60,38 @@ def prepare_dataset(source, output, seed=42):
         groups.append((session.name, entries))
     if len(groups) < 3:
         raise ValueError("Use at least three distinct recording sessions: training, validation, and test.")
-    random.Random(seed).shuffle(groups)
-    held_out = max(1, round(len(groups) * 0.15))
-    assignments = {"test": groups[:held_out], "val": groups[held_out:2 * held_out],
-                   "train": groups[2 * held_out:]}
+    frozen = None
+    split_path = Path(split_file) if split_file is not None else None
+    if split_path is not None and split_path.is_file():
+        frozen = json.loads(split_path.read_text(encoding="utf-8"))
+    elif inherit_manifest is not None and Path(inherit_manifest).is_file():
+        previous = json.loads(Path(inherit_manifest).read_text(encoding="utf-8"))
+        frozen = {"schema_version": 1, "seed": previous.get("seed", seed), "assignments": {}}
+        for split, row in previous.get("splits", {}).items():
+            for session in row.get("sessions", []):
+                if session in frozen["assignments"]:
+                    raise ValueError("The previous dataset repeats a session across splits.")
+                frozen["assignments"][session] = split
+    if frozen is not None:
+        roles = frozen.get("assignments") if isinstance(frozen, dict) else None
+        if (not isinstance(frozen, dict) or frozen.get("schema_version") != 1 or not isinstance(roles, dict) or
+                not all(isinstance(name, str) and role in ("train", "val", "test") for name, role in roles.items())):
+            raise ValueError("The saved detector split is invalid. Restore it before training.")
+        assignments = {split: [] for split in ("train", "val", "test")}
+        for name, entries in groups:
+            role = roles.setdefault(name, "train")
+            assignments[role].append((name, entries))
+    else:
+        random.Random(seed).shuffle(groups)
+        held_out = max(1, round(len(groups) * 0.15))
+        assignments = {"test": groups[:held_out], "val": groups[held_out:2 * held_out],
+                       "train": groups[2 * held_out:]}
+        frozen = {"schema_version": 1, "seed": seed, "assignments": {
+            name: split for split, sessions in assignments.items() for name, _ in sessions}}
     for split, sessions in assignments.items():
         if not sessions or sum(count for _, entries in sessions for _, _, count in entries) == 0:
             raise ValueError(f"The {split} split needs at least one labeled cat. Add cat-positive sessions or change --seed.")
-    metadata = {"seed": seed, "classes": ["cat"], "splits": {}}
+    metadata = {"seed": frozen.get("seed", seed), "classes": ["cat"], "splits": {}}
     for split, sessions in assignments.items():
         images_dir, labels_dir = output / "images" / split, output / "labels" / split
         images_dir.mkdir(parents=True, exist_ok=True)
@@ -86,4 +110,9 @@ def prepare_dataset(source, output, seed=42):
                  "train: images/train\nval: images/val\ntest: images/test\nnames:\n  0: cat\n")
     (output / "data.yaml").write_text(data_yaml, encoding="utf-8")
     (output / "split_manifest.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if split_path is not None:
+        split_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = split_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(frozen, indent=2), encoding="utf-8")
+        temporary.replace(split_path)
     return metadata
