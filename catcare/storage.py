@@ -57,6 +57,19 @@ class Store:
     def break_coverage(self):
         self.coverage_id = self.last_coverage = None
 
+    def reset_reports(self):
+        """Clear this database's monitoring history in one transaction."""
+        deleted = {"visits": self.db.execute("SELECT count(*) FROM visits").fetchone()[0],
+                   "activities": self.db.execute("SELECT count(*) FROM activities").fetchone()[0],
+                   "coverage_intervals": self.db.execute("SELECT count(*) FROM coverage").fetchone()[0]}
+        with self.db:
+            self.db.execute("DELETE FROM activity_intervals")
+            self.db.execute("DELETE FROM activities")
+            self.db.execute("DELETE FROM visits")
+            self.db.execute("DELETE FROM coverage")
+        self.break_coverage()
+        return deleted
+
     def summary(self, now, window_seconds=86400):
         cutoff = now - window_seconds
         counts = {}

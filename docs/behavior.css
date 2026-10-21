@@ -1,6 +1,8 @@
 .activity-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
 .activity-metrics .metric .badge{align-self:flex-start;margin-top:12px;font-size:11px}
 .behavior-gallery{margin-top:24px}
+.report-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;margin-left:auto}
+.section-title.routine-title{flex-wrap:wrap;gap:12px}
 .inference-controls{margin-bottom:24px}
 .inference-controls .panel-heading{flex-wrap:wrap;gap:12px}
 .detector-comparison{grid-column:1/-1;width:100%;border-collapse:collapse;font-size:12px;margin-top:12px}

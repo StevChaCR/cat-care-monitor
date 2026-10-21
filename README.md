@@ -2,6 +2,10 @@
 
 ## Version 0.4: one shared detector and developer training
 
+Version 0.4.3 adds **Overview → Reset reports**. Disconnect the camera and confirm the selected profile to start its monitoring reports from zero. See the reset instructions under Records below.
+
+Version 0.4.2 adds recoverable learning-image cleanup in **Cat library** and a **Dataset checklist** in Behavior lab. The checklist explains each training blocker and shows where Eating, Drinking, and Other clips are assigned. Whole recording periods are balanced for class and station coverage when the initial random assignment fails. See [the behavior workflow](docs/BEHAVIOR.md) for the three-period rule and the seven-Other example, and [training](docs/TRAINING.md) for image cleanup.
+
 Version 0.4.1 adds station-specific behavior collection and clip cleanup. In the Behavior lab, collect **Food only**, **Water only**, or both; review the actual activity before labeling. Move bad clips to recoverable trash, restore them from the Trash filter, or permanently empty the trash to reclaim disk space. See [the behavior workflow](docs/BEHAVIOR.md).
 
 The normal web launcher now exposes camera setup and observations. Photo labeling and model training are developer tools, opened with **`start_training_windows.bat`** or `python web_app.py --open --training`. End users do not have to create a personal dataset.
@@ -107,6 +111,10 @@ The setup dialog supports sizes up to 1920. Image size affects model processing;
 - A camera interruption closes an active record as interrupted and requires an observed departure before counting another visit at that station during the same run.
 - Visits interrupted by a connection failure, shutdown, or attribution ambiguity retain their observations and an incomplete status.
 - The SQLite database remains authoritative if Excel locks the CSV. Close Excel to refresh the export.
+
+To start monitoring reports from zero, disconnect the camera and choose **Overview → Reset reports**. The confirmation identifies the current profile. Reset permanently removes its complete saved visit and activity history, measured durations, and monitoring coverage, including records older than the 24-hour dashboard window. It clears persisted database rows as well as the dashboard totals, and regenerates both CSV files with headers only. Reconnecting starts new observations without resuming erased activities.
+
+Training images, reviewed labels, behavior clips, trained weights, zones, other profiles, and training-run metrics are retained. Close other monitoring instances for the same profile before resetting. If Excel or another program locks a CSV, close it and retry. The reset stages both old exports before the database transaction and restores them if that transaction fails. If new empty CSVs cannot be created after a successful database reset, the app reports that separately and does not serve the old exports as current reports. CSVs already downloaded elsewhere are separate files.
 
 This is an observational prototype. Compare at least 10 manually observed visits, passes near stations, and empty scenes with its records before relying on the counts. Review incomplete visits.
 

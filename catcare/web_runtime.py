@@ -1,9 +1,11 @@
 """Headless local camera runtime for the browser interface."""
 import copy
 import json
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import DEFAULTS, LOCAL, load_settings, profile_stem, save_settings, validate_settings, activity_model_path
 from .core import VisitCounter, assign_station, pixel_zones, station_presence, validate_zones
@@ -122,6 +124,53 @@ class WebRuntime:
         public = {key: self.config[key] for key in DEFAULTS}
         temporary.write_text(json.dumps(public, indent=2), encoding="utf-8")
         temporary.replace(path)
+
+    def reset_reports(self, label, confirmed=False):
+        with self.lock:
+            if confirmed is not True:
+                raise ValueError("Confirm the report reset before continuing.")
+            if label != self.config["cat_label"]:
+                raise ValueError("The selected profile changed. Refresh before resetting its reports.")
+            if self.active():
+                raise ValueError("Disconnect the camera before resetting reports.")
+            stem = profile_stem(self.config["cat_label"])
+            folder = LOCAL / "reports"
+            folder.mkdir(parents=True, exist_ok=True)
+            reports = (folder / f"visits_{stem}.csv", folder / f"activities_{stem}.csv")
+            store = Store(LOCAL / "data" / f"visits_{stem}.sqlite3", recover=False)
+            try:
+                # Move old exports out of the way before erasing database rows.
+                # A locked CSV aborts the reset and restores previously moved exports.
+                with tempfile.TemporaryDirectory(prefix="report-reset-", dir=folder) as temporary:
+                    staged = []
+                    try:
+                        for path in reports:
+                            if path.exists():
+                                destination = Path(temporary) / path.name
+                                path.replace(destination)
+                                staged.append((path, destination))
+                        deleted = store.reset_reports()
+                    except Exception as error:
+                        for path, destination in reversed(staged):
+                            destination.replace(path)
+                        if isinstance(error, PermissionError):
+                            raise ValueError("Close the profile's CSV reports in Excel or other programs, then reset again.") from None
+                        raise
+                    now = time.time()
+                    self.state["summary"] = store.summary(now)
+                    self.state["behavior"]["summary"] = store.activity_summary(now)
+                    exports_ready = True
+                    for export, path in ((store.export, reports[0]), (store.export_activities, reports[1])):
+                        try:
+                            if not export(path):
+                                exports_ready = False
+                        except OSError:
+                            exports_ready = False
+                    # On success the staged CSVs are removed. They must never be
+                    # restored after the database reset, even if a new export fails.
+                    return {"deleted": deleted, "exports_ready": exports_ready}
+            finally:
+                store.close()
 
     def zones(self, zones):
         if self.active():

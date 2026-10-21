@@ -8,7 +8,9 @@
   const trainingMode = local && document.querySelector('meta[name="catcare-training"]')?.content === 'true';
   const state = { status: null, configLoaded: false, zones: {}, frame: null,
     images: [], sessions: [], galleryUrls: [], label: null, labelImage: null, boxes: [],
-    drawing: null, cameraBusy: false, frameBusy: false, libraryBusy: false, bundleBusy: false };
+    drawing: null, cameraBusy: false, frameBusy: false, libraryBusy: false, bundleBusy: false,
+    imageTrash: [], imagesMutating: false, libraryPending: false, imageLimit: 60, labelSaving: false, labelGeneration: 0,
+    reportsBusy: false };
   const names = { overview: 'Overview', camera: 'Camera & zones', library: 'Cat library', training: 'Train detection', behavior: 'Behavior lab' };
   const stationNames = { litter_box: 'Litter box', food: 'Food', water: 'Water' };
   const colors = { litter_box: '#9b7fc1', food: '#d0a45a', water: '#65a3bb' };
@@ -102,6 +104,11 @@
     const busy = [row.training, row.behavior_training].some(job => ['preparing', 'training', 'evaluating'].includes(job?.phase));
     $('connect-button').disabled = !local || active || busy || state.cameraBusy;
     $('disconnect-button').disabled = !local || !active || state.cameraBusy;
+    $('reset-reports').disabled = !local || active || state.reportsBusy || state.cameraBusy;
+    $('export-button').disabled = !local || state.reportsBusy;
+    $('report-reset-note').textContent = state.reportsBusy ? 'Resetting the selected profile’s reports…' : active ?
+      'Disconnect the camera to enable Reset reports. All saved monitoring history for this profile will be erased.' :
+      `Reset reports clears all saved visits, activity sessions, durations, and monitoring coverage for ${row.config.cat_label}. Training images, clips, models, and zones are kept.`;
     $('save-zones').disabled = !local || active || !state.frame;
     $('collect-button').disabled = !local || !active;
     $('collect-button').textContent = row.collecting ? `Stop collecting · ${row.collected} saved` : 'Collect camera images automatically';
@@ -578,10 +585,73 @@
     const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'cat-care-visits.csv';
     anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
+  $('reset-reports').onclick = () => action(async () => {
+    if (state.reportsBusy) return;
+    const profile = state.status?.config.cat_label;
+    if (!profile) throw new Error('Wait for the local profile to load.');
+    if (state.status.running) throw new Error('Disconnect the camera before resetting reports.');
+    if (!confirm(`Reset all saved reports for ${profile}? This permanently deletes this profile's station visits, eating/drinking activity records, durations, and monitoring coverage. Training images, clips, models, zones, and other profiles are kept.`)) return;
+    state.reportsBusy = true; renderStatus(state.status);
+    try {
+      const row = await (await api('/api/reports/reset', { cat_label: profile, confirmed: true })).json();
+      renderStatus(await (await api('/api/status')).json());
+      toast(row.exports_ready ? 'Reports reset. Totals start at zero when you reconnect the camera.' :
+        'Report history reset. CSV exports could not be refreshed; check the reports folder permissions.', !row.exports_ready);
+    } finally { state.reportsBusy = false; if (state.status) renderStatus(state.status); }
+  });
   const behavior = { clips: [], trash: [], sessions: [], urls: [], busy: false, clip: null, frames: [],
     index: 0, playing: false, timer: null, generation: 0, captured: -1, saving: false,
-    mutating: false, collectBusy: false, refreshPending: false, limit: 60 };
+    mutating: false, collectBusy: false, refreshPending: false, limit: 60, readiness: null, checkBusy: false };
   const activityNames = { eating: 'Eating', drinking: 'Drinking', other: 'Other', exclude: 'Cannot tell' };
+
+  function renderBehaviorReadiness(report) {
+    behavior.readiness = report;
+    $('behavior-data-summary').textContent = `${report.counts.eating} Eating · ${report.counts.drinking} Drinking · ${report.counts.other} Other · ${report.unreviewed} need review · ${report.usable_periods} usable recording periods. ` +
+      (report.ready ? 'Class coverage is ready for training; frame integrity is checked at startup.' : 'Resolve the items below before training.');
+    $('behavior-data-issues').replaceChildren();
+    for (const message of report.issues) {
+      const item = document.createElement('li'); item.textContent = message; $('behavior-data-issues').append(item);
+    }
+    const splitNames = { train: 'Training', val: 'Validation', test: 'Test' };
+    $('behavior-data-splits').replaceChildren();
+    for (const name of ['train', 'val', 'test']) {
+      const split = report.splits[name]; const tr = document.createElement('tr');
+      const values = [splitNames[name], split.periods.join(', ') || 'None',
+        ...['eating', 'drinking', 'other'].map(activity => `${split.counts[activity]} / ${split.minimums[activity]}`),
+        `${split.other_by_station.food} / ${split.other_by_station.water} (each ≥ 1)`];
+      values.forEach((value, index) => {
+        const td = document.createElement('td'); td.textContent = value;
+        if ((index >= 2 && index <= 4 && split.counts[['eating', 'drinking', 'other'][index - 2]] < split.minimums[['eating', 'drinking', 'other'][index - 2]]) ||
+            (index === 5 && (!split.other_by_station.food || !split.other_by_station.water))) td.className = 'missing';
+        tr.append(td);
+      });
+      $('behavior-data-splits').append(tr);
+    }
+    $('behavior-data-periods').replaceChildren();
+    for (const period of report.periods) {
+      const tr = document.createElement('tr');
+      const time = period.start === null ? 'No clips' : `${new Date(period.start * 1000).toLocaleString()} – ${new Date(period.end * 1000).toLocaleString()}`;
+      for (const value of [period.name, time, splitNames[period.split] || 'No usable labels',
+        `${period.counts.eating} / ${period.counts.drinking} / ${period.counts.other}`, period.unreviewed]) {
+        const td = document.createElement('td'); td.textContent = value; tr.append(td);
+      }
+      $('behavior-data-periods').append(tr);
+    }
+    if (state.status) renderBehavior(state.status);
+  }
+  async function checkBehaviorData() {
+    if (!trainingMode || behavior.checkBusy) return behavior.readiness;
+    behavior.checkBusy = true; $('behavior-check-data').disabled = true;
+    try {
+      const report = await (await api('/api/behavior/readiness')).json();
+      renderBehaviorReadiness(report);
+      return report;
+    } finally {
+      behavior.checkBusy = false; $('behavior-check-data').disabled = !local;
+      if (state.status) renderBehavior(state.status);
+    }
+  }
+  $('behavior-check-data').onclick = () => action(checkBehaviorData);
 
   function behaviorEditingLocked() {
     return behavior.mutating || behavior.saving || [state.status?.training, state.status?.behavior_training]

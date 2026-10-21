@@ -187,6 +187,10 @@ def make_server(runtime, port=8765, training_mode=False):
                     runtime.connect(data.get("url", ""))
                 elif path == "/api/disconnect":
                     runtime.disconnect()
+                elif path == "/api/reports/reset":
+                    row = runtime.reset_reports(data.get("cat_label"), data.get("confirmed"))
+                    self.reply({"ok": True, **row})
+                    return
                 elif path == "/api/zones":
                     runtime.zones(data.get("zones"))
                 elif path == "/api/collect":

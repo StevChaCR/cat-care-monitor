@@ -1,5 +1,9 @@
 # Update an existing installation
 
+Version 0.4.3 adds **Overview → Reset reports** in normal and developer mode. Disconnect the camera, press the button, and confirm the current profile. It clears all saved station visits, eating/drinking records, durations, and monitoring coverage for that profile and replaces the CSV exports with empty reports. Training images, clips, labels, models, zones, other profiles, and historical training metrics are retained. If a CSV is locked by Excel, close it and try again; the database is not reset until both existing exports can be moved safely.
+
+Version 0.4.2 adds image trash and restore in **Cat library**, with permanent emptying of explicitly selected trashed images and their labels. It adds a **Behavior lab → Dataset checklist** with actual counts, proposed split membership, missing activity/station examples, unreviewed clips, and overlapping recording periods. When the first random split lacks coverage, preparation now searches for a valid assignment of whole periods before rejecting the data. Training, validation, and test remain separate; no per-class minimum has been lowered.
+
 Version 0.4.1 adds **Food only / Water only / Both** behavior collection, station filters, recoverable clip trash, restore, batch cleanup of Cannot tell clips, and confirmed permanent emptying of trash. Choose the station before starting collection; clips still require activity review. See `docs/BEHAVIOR.md` for cleanup and focused collection instructions.
 
 Version 0.4.0 keeps one selected detector, continues training from its weights, preserves recording-session split assignments, compares the previous cat-only detector against the candidate on the same test images, and bundles the selected detector for new installations. The performance controls from 0.3.1 remain available. See `docs/SHARED_MODEL.md`.

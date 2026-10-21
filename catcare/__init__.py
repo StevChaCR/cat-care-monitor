@@ -1,2 +1,2 @@
 """Local camera monitoring for one cat's station visits."""
-__version__ = "0.4.1"
+__version__ = "0.4.3"

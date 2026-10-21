@@ -48,7 +48,8 @@
           <a class="step-card" href="#library"><span class="step-no">02</span><span class="step-icon photo-icon" aria-hidden="true">▧</span><h3>Meet your cat</h3><p>Add photos or let the camera collect learning frames for review.</p><span class="card-link">Build cat library <span>↗</span></span></a>
           <a class="step-card" href="#training"><span class="step-no">03</span><span class="step-icon learn-icon" aria-hidden="true">✧</span><h3>Build the shared detector</h3><p>Train and evaluate reviewed examples from varied cats and cameras.</p><span class="card-link">Improve shared detection <span>↗</span></span></a>
         </div>
-        <div class="section-title routine-title"><div><h2>Their last 24 hours</h2><span class="muted" id="coverage">Connect a camera and select zones to begin recording.</span></div><button class="button small" id="export-button" data-local type="button" disabled>Export visits ↗</button></div>
+        <div class="section-title routine-title"><div><h2>Their last 24 hours</h2><span class="muted" id="coverage">Connect a camera and select zones to begin recording.</span></div><div class="report-actions"><button class="button small" id="export-button" data-local type="button" disabled>Export visits ↗</button><button class="button small danger" id="reset-reports" data-local type="button" disabled>Reset reports</button></div></div>
+        <p id="report-reset-note" class="hint">Disconnect the camera to reset this profile's saved report history.</p>
         <div class="metrics-grid">
           <div class="metric"><span class="metric-icon">⌂</span><span>Litter box visits</span><strong id="metric-litter_box">—</strong><small id="duration-litter_box">No observations yet</small></div>
           <div class="metric"><span class="metric-icon">◡</span><span>Food station visits</span><strong id="metric-food">—</strong><small id="duration-food">No observations yet</small></div>
