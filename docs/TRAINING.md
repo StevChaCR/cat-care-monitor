@@ -82,3 +82,13 @@ Better mAP alone does not prove better station counting. Keep the old model and 
 ## Private training data
 
 Captures, labels, datasets, checkpoints, and metrics are under `local/` and excluded from Git. Keep private images out of the public source archive. The application does not upload them automatically. Publishing a custom model is a separate release decision; respect image permissions and upstream model licensing.
+
+## Remove or correct training images
+
+In **Cat library**, use **Move to trash** on an image card or inside its box editor. Its JPEG, metadata, and reviewed label move together. Trashed images are excluded from future dataset preparation. Use **Show → Trash → Restore image** to recover the original image, label, and session. A confirmed empty-scene label remains distinct from an image that was never reviewed.
+
+To reclaim disk space, use **Empty image trash** and confirm the displayed count. Only the explicitly listed trash items are permanently erased, up to 600 per action. Active images, model weights, visit records, behavior clips, and historical training runs are separate. Historical training runs retain the dataset snapshots they prepared earlier.
+
+For a useful photo with an incorrect label, open it, press **Clear boxes**, and draw one box per actual cat. A photo of Mila alone should contain one cat box. Keep useful empty scenes and correctly annotated examples rather than deleting every difficult photo. Images with an unreadable preview can still be moved to trash. Image and label changes are blocked while training is running.
+
+Deleting an example does not remove its influence from weights that were already trained on it. Clean the labels and train a new candidate. When investigating a regression, compare with a previously working checkpoint and use that checkpoint as a base when appropriate; this update does not automatically replace or erase the currently selected weights.

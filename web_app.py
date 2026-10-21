@@ -78,7 +78,7 @@ def make_server(runtime, port=8765, training_mode=False):
             path = urlsplit(self.path).path
             if not self.guarded(path.startswith("/api/")):
                 return
-            if not training_mode and (path == "/api/library" or path.startswith(("/api/image/", "/api/thumbnail/", "/api/behavior/frame/")) or path == "/api/behavior/library"):
+            if not training_mode and (path == "/api/library" or path.startswith(("/api/image/", "/api/thumbnail/", "/api/behavior/frame/")) or path in ("/api/behavior/library", "/api/behavior/readiness")):
                 self.reply({"error": "The training laboratory is disabled in normal mode."}, 403)
                 return
             try:
@@ -93,10 +93,17 @@ def make_server(runtime, port=8765, training_mode=False):
                     else:
                         self.send(200, frame, "image/jpeg")
                 elif path == "/api/library":
-                    self.reply({"sessions": runtime.library.sessions(), "images": runtime.library.images()})
+                    self.reply({"sessions": runtime.library.sessions(), "images": runtime.library.images(),
+                                "trash": runtime.library.trashed_images()})
                 elif path == "/api/behavior/library":
-                    self.reply({"sessions": runtime.behavior_library.sessions(), "clips": runtime.behavior_library.clips(),
-                                "trash": runtime.behavior_library.trashed_clips()})
+                    from catcare.behavior_data import behavior_readiness
+                    library = runtime.behavior_library
+                    sessions, clips = library.sessions(), library.clips()
+                    self.reply({"sessions": sessions, "clips": clips, "trash": library.trashed_clips(),
+                                "readiness": behavior_readiness(library.root, rows=clips, sessions=sessions)})
+                elif path == "/api/behavior/readiness":
+                    from catcare.behavior_data import behavior_readiness
+                    self.reply(behavior_readiness(runtime.behavior_library.root))
                 elif path.startswith("/api/behavior/frame/"):
                     key, index = path.removeprefix("/api/behavior/frame/").rsplit("/", 1)
                     trashed = parse_qs(urlsplit(self.path).query).get("trash") == ["1"]
@@ -109,10 +116,12 @@ def make_server(runtime, port=8765, training_mode=False):
                     else:
                         self.reply({"error": "No activity report has been recorded yet."}, 404)
                 elif path.startswith("/api/image/"):
-                    self.send(200, runtime.library.image_path(path.removeprefix("/api/image/")).read_bytes(), "image/jpeg")
+                    trashed = parse_qs(urlsplit(self.path).query).get("trash") == ["1"]
+                    self.send(200, runtime.library.image_path(path.removeprefix("/api/image/"), trashed=trashed).read_bytes(), "image/jpeg")
                 elif path.startswith("/api/thumbnail/"):
                     from PIL import Image
-                    with Image.open(runtime.library.image_path(path.removeprefix("/api/thumbnail/"))) as original:
+                    trashed = parse_qs(urlsplit(self.path).query).get("trash") == ["1"]
+                    with Image.open(runtime.library.image_path(path.removeprefix("/api/thumbnail/"), trashed=trashed)) as original:
                         original.thumbnail((360, 240))
                         output = io.BytesIO()
                         original.save(output, format="JPEG", quality=75)
@@ -146,7 +155,7 @@ def make_server(runtime, port=8765, training_mode=False):
                 return
             path = urlsplit(self.path).path
             lab_routes = {"/api/collect", "/api/sessions", "/api/labels", "/api/train", "/api/train/cancel", "/api/train/activate", "/api/train/bundle", "/api/performance"}
-            if not training_mode and (path in lab_routes or path.startswith(("/api/upload/", "/api/behavior/"))):
+            if not training_mode and (path in lab_routes or path.startswith(("/api/upload/", "/api/images/", "/api/behavior/"))):
                 self.reply({"error": "Open the developer training launcher to use the laboratory."}, 403)
                 return
             try:
@@ -186,7 +195,11 @@ def make_server(runtime, port=8765, training_mode=False):
                     self.reply(runtime.library.create_session(data.get("name", "")))
                     return
                 elif path == "/api/labels":
-                    runtime.library.save_label(data.get("id"), data.get("boxes"), data.get("negative", False))
+                    runtime.label_image(data.get("id"), data.get("boxes"), data.get("negative", False))
+                elif path in ("/api/images/trash", "/api/images/restore", "/api/images/purge"):
+                    count = runtime.manage_images(path.rsplit("/", 1)[1], data.get("ids"))
+                    self.reply({"ok": True, "count": count})
+                    return
                 elif path == "/api/train":
                     runtime.start_training(data.get("epochs", 60))
                 elif path == "/api/train/cancel":

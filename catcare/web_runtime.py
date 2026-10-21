@@ -265,6 +265,27 @@ class WebRuntime:
                 return self.behavior_library.purge_clips(keys)
             raise ValueError("Invalid behavior clip action.")
 
+    def manage_images(self, operation, keys):
+        with self.lock:
+            if self.training_busy():
+                raise ValueError("Stop training before changing learning images.")
+            if operation == "trash":
+                return self.library.move_to_trash(keys)
+            if operation == "restore":
+                if not isinstance(keys, list) or len(keys) != 1:
+                    raise ValueError("Choose one learning image to restore.")
+                self.library.restore_image(keys[0])
+                return 1
+            if operation == "purge":
+                return self.library.purge_images(keys)
+            raise ValueError("Invalid learning image action.")
+
+    def label_image(self, key, boxes, negative=False):
+        with self.lock:
+            if self.training_busy():
+                raise ValueError("Stop training before changing detector labels.")
+            self.library.save_label(key, boxes, negative)
+
     def label_behavior_clip(self, key, label):
         with self.lock:
             if self.training_busy():

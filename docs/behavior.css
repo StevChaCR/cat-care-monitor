@@ -16,6 +16,21 @@
 .button.danger{color:#8c4237;border-color:#d9b8af}
 .button.danger:hover:not(:disabled){background:#faeee9;border-color:#ba8274}
 #behavior-more{margin-top:18px}
+#image-more{margin-top:18px}
+.image-card{display:flex;flex-direction:column;gap:6px;min-width:0}
+.image-card .photo-card{width:100%}
+.image-card>.button{align-self:flex-start}
+.dataset-checklist{margin:18px 0;padding:15px;background:#f5f6ee;border:1px solid #e0e6d7;border-radius:10px}
+.dataset-checklist h3{font-size:14px;margin:0}
+.dataset-checklist details{margin-top:14px}
+.dataset-checklist summary{cursor:pointer;font-size:12px;font-weight:600}
+.dataset-checklist details p{margin-top:10px}
+.dataset-checklist ul{font-size:12px;padding-left:18px;line-height:1.6;color:#804d34}
+.dataset-table-wrap{overflow-x:auto;width:100%}
+.dataset-table{width:100%;border-collapse:collapse;font-size:11px;margin:12px 0}
+.dataset-table caption{text-align:left;font-size:11px;color:var(--muted)}
+.dataset-table th,.dataset-table td{text-align:left;vertical-align:top;border-bottom:1px solid #dce3d4;padding:8px 6px}
+.dataset-table .missing{color:#8c4237;font-weight:600}
 .behavior-results{background:#f3f5ed;border-radius:12px;padding:15px;margin-top:18px}
 .behavior-results p{margin:5px 0;font-size:12px}
 #behavior-dialog{width:min(880px,94vw);max-height:94vh;overflow:auto}

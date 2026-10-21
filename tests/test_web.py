@@ -59,6 +59,22 @@ class ImageReviewTests(unittest.TestCase):
 
 
 class LocalApiTests(unittest.TestCase):
+    def test_image_cleanup_is_authenticated_and_preserves_original_labels(self):
+        session = self.runtime.library.create_session('Independent occasion')
+        row = self.runtime.library.add_image(session['id'], b'private-picture', 640, 480)
+        self.runtime.library.save_label(row['id'], [[.1, .2, .5, .8]])
+        data = {'ids': [row['id']]}
+        self.assertEqual(self.request('POST', '/api/images/trash', data)[0], 403)
+        self.assertEqual(self.request('POST', '/api/images/trash', data, authenticated=True)[0], 200)
+        images = json.loads(self.request('GET', '/api/library', authenticated=True)[1])
+        self.assertEqual(images['images'], [])
+        self.assertTrue(images['trash'][0]['reviewed'])
+        self.assertEqual(self.request('GET', f"/api/image/{row['id']}?trash=1", authenticated=True), (200, b'private-picture'))
+        self.assertEqual(self.request('POST', '/api/images/purge', {'ids': ['../settings']}, authenticated=True)[0], 400)
+        self.assertEqual(self.request('POST', '/api/images/restore', data, authenticated=True)[0], 200)
+        self.assertTrue(self.runtime.library.images()[0]['reviewed'])
+        self.assertEqual(self.request('POST', '/api/images/purge', data, authenticated=True)[0], 400)
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

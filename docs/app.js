@@ -68,6 +68,12 @@
   }
 
   function loadConfig(config) {
+    if (state.loadedProfile && state.loadedProfile !== config.cat_label) {
+      behavior.readiness = null; behavior.captured = -1;
+      $('behavior-data-summary').textContent = 'Profile changed. Open Behavior lab or press Check dataset to inspect this profile.';
+      for (const id of ['behavior-data-issues', 'behavior-data-splits', 'behavior-data-periods']) $(id).replaceChildren();
+    }
+    state.loadedProfile = config.cat_label;
     $('cat-name').value = config.cat_label;
     $('library-cat-name').value = config.cat_label;
     $('sidebar-name').textContent = config.cat_label === 'Cat' ? "Your cat's space" : `${config.cat_label}'s space`;
@@ -295,33 +301,54 @@
   addEventListener('resize', drawCamera);
 
   function revokeGallery() { state.galleryUrls.forEach(URL.revokeObjectURL); state.galleryUrls = []; }
+  function imageEditingLocked() {
+    return !trainingMode || state.imagesMutating || state.labelSaving || [state.status?.training, state.status?.behavior_training]
+      .some(job => ['preparing', 'training', 'evaluating'].includes(job?.phase));
+  }
+  const imageUrl = (image, thumbnail = false) => `/api/${thumbnail ? 'thumbnail' : 'image'}/${image.id}${image.trashed ? '?trash=1' : ''}`;
+  function updateImageControls() {
+    const locked = imageEditingLocked();
+    $('image-empty-trash').disabled = locked || !state.imageTrash.length;
+    $('image-empty-trash').textContent = `Empty image trash (${Math.min(600, state.imageTrash.length)})`;
+    $('image-trash-current').hidden = !state.label || !!state.label.trashed;
+    $('image-restore-current').hidden = !state.label?.trashed;
+    $('image-trash-current').disabled = $('image-restore-current').disabled = locked;
+    for (const id of ['clear-boxes', 'empty-scene', 'save-label']) {
+      $(id).disabled = locked || !state.labelImage || !!state.label?.trashed;
+    }
+    document.querySelectorAll('[data-image-action]').forEach(button => { button.disabled = locked; });
+  }
   async function refreshLibrary() {
-    if (state.libraryBusy) return;
+    if (state.libraryBusy) { state.libraryPending = true; return; }
     state.libraryBusy = true;
+    $('image-more').disabled = true;
     try {
       const data = await (await api('/api/library')).json();
-      state.images = data.images;
+      state.images = data.images.map(image => ({ ...image, trashed: false }));
+      state.imageTrash = (data.trash || []).map(image => ({ ...image, trashed: true }));
       state.sessions = data.sessions;
       const selected = $('session-select').value;
       $('session-select').replaceChildren(new Option('Choose a recording session', ''));
       for (const session of data.sessions) $('session-select').add(new Option(session.name, session.id));
-      $('session-select').value = selected || data.sessions.at(-1)?.id || '';
+      $('session-select').value = data.sessions.some(session => session.id === selected) ? selected : data.sessions.at(-1)?.id || '';
       const reviewed = data.images.filter(image => image.reviewed).length;
       $('library-count').textContent = data.images.length;
-      $('library-stats').textContent = `${data.images.length} images · ${reviewed} reviewed · ${data.sessions.length} sessions`;
-      if (!data.images.length) {
-        revokeGallery();
-        $('photo-grid').replaceChildren();
+      const filter = $('image-filter').value;
+      const matches = (filter === 'trash' ? state.imageTrash : state.images).filter(image =>
+        !['reviewed', 'unreviewed'].includes(filter) || image.reviewed === (filter === 'reviewed'));
+      const images = matches.slice(-state.imageLimit).reverse();
+      $('library-stats').textContent = `${data.images.length} active · ${reviewed} reviewed · ${state.imageTrash.length} in trash · showing ${images.length} / ${matches.length} matching images`;
+      $('image-more').hidden = matches.length <= state.imageLimit;
+      revokeGallery(); $('photo-grid').replaceChildren(); updateImageControls();
+      if (!images.length) {
         const empty = document.createElement('div');
         empty.className = 'empty-library';
-        const title = document.createElement('strong'); title.textContent = 'Every cat starts somewhere.';
-        const message = document.createElement('p'); message.textContent = 'Add photos or collect camera frames to start your library.';
+        const title = document.createElement('strong'); title.textContent = 'No images match this filter.';
+        const message = document.createElement('p'); message.textContent = 'Choose Active images, add photos, or collect camera frames.';
         empty.append(title, message); $('photo-grid').append(empty);
-        return;
       }
-      revokeGallery();
-      $('photo-grid').replaceChildren();
-      for (const image of data.images) {
+      for (const image of images) {
+        const card = document.createElement('div'); card.className = 'image-card';
         const button = document.createElement('button');
         button.className = `photo-card${image.reviewed ? ' reviewed' : ''}`;
         button.type = 'button';
@@ -333,14 +360,40 @@
         label.textContent = image.reviewed ? (image.boxes.length ? `✓ ${image.boxes.length} cat box(es)` : '✓ Empty scene') : 'Review image ↗';
         button.append(picture, label);
         button.onclick = () => action(() => openLabel(image));
-        $('photo-grid').append(button);
+        const manage = document.createElement('button'); manage.type = 'button'; manage.className = 'button small';
+        manage.dataset.imageAction = image.trashed ? 'restore' : 'trash';
+        manage.textContent = image.trashed ? 'Restore image' : 'Move to trash'; manage.disabled = imageEditingLocked();
+        manage.setAttribute('aria-label', `${manage.textContent}: image from ${image.session_name}`);
+        manage.onclick = () => action(() => changeImages(manage.dataset.imageAction, [image.id]));
+        card.append(button, manage); $('photo-grid').append(card);
         try {
-          const url = URL.createObjectURL(await (await api(`/api/thumbnail/${image.id}`)).blob());
+          const url = URL.createObjectURL(await (await api(imageUrl(image, true))).blob());
           state.galleryUrls.push(url); picture.src = url;
         } catch { label.textContent = 'Could not load image'; }
       }
-    } finally { state.libraryBusy = false; }
+    } finally {
+      state.libraryBusy = false; $('image-more').disabled = false; updateImageControls();
+      if (state.libraryPending) { state.libraryPending = false; action(refreshLibrary); }
+    }
   }
+  $('image-filter').onchange = () => { state.imageLimit = 60; action(refreshLibrary); };
+  $('image-more').onclick = () => { state.imageLimit += 60; action(refreshLibrary); };
+  async function changeImages(operation, ids) {
+    if (imageEditingLocked()) throw new Error('Wait for training or the current image action to finish.');
+    state.imagesMutating = true; updateImageControls();
+    try {
+      await api(`/api/images/${operation}`, { ids });
+      if (state.label && ids.includes(state.label.id)) $('label-dialog').close();
+      await refreshLibrary();
+      toast(operation === 'trash' ? 'Image and label moved to trash. Choose Show → Trash to restore them.' :
+        operation === 'restore' ? 'Image restored with its original label and recording session.' : `${ids.length} image(s) and their labels permanently deleted.`);
+    } finally { state.imagesMutating = false; updateImageControls(); }
+  }
+  $('image-empty-trash').onclick = () => action(async () => {
+    const ids = state.imageTrash.slice(-600).map(image => image.id);
+    if (!ids.length || !confirm(`Permanently delete these ${ids.length} trashed images and their labels? This cannot be undone. Earlier training snapshots and trained models retain their data.`)) return;
+    await changeImages('purge', ids);
+  });
   $('new-session').onclick = () => action(async () => {
     const session = await (await api('/api/sessions', { name: $('session-name').value })).json();
     $('session-name').value = '';
@@ -391,13 +444,22 @@
   });
 
   async function openLabel(image) {
-    const bitmap = await createImageBitmap(await (await api(`/api/image/${image.id}`)).blob());
-    state.labelImage?.close();
+    const generation = ++state.labelGeneration;
+    state.labelImage?.close(); state.labelImage = null;
     state.label = image;
-    state.labelImage = bitmap;
     state.boxes = structuredClone(image.boxes);
     if (!$('label-dialog').open) $('label-dialog').showModal();
-    drawLabel();
+    const canvas = $('label-canvas'); canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+    $('label-count').textContent = 'Loading image…'; updateImageControls();
+    try {
+      const bitmap = await createImageBitmap(await (await api(imageUrl(image))).blob());
+      if (generation !== state.labelGeneration || !$('label-dialog').open) { bitmap.close(); return; }
+      state.labelImage = bitmap; drawLabel();
+    } catch (error) {
+      if (generation !== state.labelGeneration || !$('label-dialog').open) return;
+      $('label-count').textContent = 'Preview unavailable. You can still move this image to trash.';
+      throw error;
+    } finally { updateImageControls(); }
   }
   function drawLabel() {
     if (!state.labelImage) return;
@@ -407,27 +469,41 @@
     canvas.getContext('2d').drawImage(state.labelImage, 0, 0);
     state.boxes.forEach((box, index) => rectangle(canvas, box, `Cat ${index + 1}`, '#386d4d'));
     if (state.drawing?.mode === 'label') rectangle(canvas, dragBox(state.drawing), '', '#bc8e44');
-    $('label-count').textContent = state.boxes.length ? `${state.boxes.length} cat box(es) drawn.` : 'No boxes drawn. Explicitly mark cat-free images as empty scenes.';
+    $('label-count').textContent = state.label?.trashed ? 'Trashed image: restore it before changing its boxes.' :
+      state.boxes.length ? `${state.boxes.length} cat box(es) drawn. Use one per actual cat.` : 'No boxes drawn. Explicitly mark cat-free images as empty scenes.';
   }
-  installDrawing($('label-canvas'), 'label', () => local && !!state.labelImage,
+  installDrawing($('label-canvas'), 'label', () => !imageEditingLocked() && !!state.labelImage && !state.label?.trashed,
     box => { state.boxes.push(box); }, drawLabel);
   $('close-label').onclick = () => $('label-dialog').close();
+  $('label-dialog').addEventListener('close', () => {
+    state.labelGeneration++; state.labelImage?.close(); state.labelImage = null; state.label = null;
+    if (state.drawing?.mode === 'label') state.drawing = null;
+  });
+  $('image-trash-current').onclick = () => action(async () => {
+    if (state.label && !state.label.trashed) await changeImages('trash', [state.label.id]);
+  });
+  $('image-restore-current').onclick = () => action(async () => {
+    if (state.label?.trashed) await changeImages('restore', [state.label.id]);
+  });
   $('clear-boxes').onclick = () => { state.boxes = []; drawLabel(); };
   async function saveLabel(negative) {
-    if (!state.label) return;
+    if (imageEditingLocked() || !state.label || state.label.trashed) return;
     if (!negative && !state.boxes.length) throw new Error('Draw at least one cat box, or choose No cat in this image.');
-    await api('/api/labels', { id: state.label.id, boxes: negative ? [] : state.boxes, negative });
-    const key = state.label.id;
-    $('label-dialog').close();
-    await refreshLibrary();
-    const next = state.images.find(image => !image.reviewed && image.id !== key);
-    toast('Reviewed label saved.');
-    if (next) await openLabel(next);
+    state.labelSaving = true; updateImageControls();
+    try {
+      const key = state.label.id;
+      await api('/api/labels', { id: key, boxes: negative ? [] : state.boxes, negative });
+      $('label-dialog').close(); await refreshLibrary();
+      const next = state.images.find(image => !image.reviewed && image.id !== key);
+      toast('Reviewed label saved.');
+      if (next) await openLabel(next);
+    } finally { state.labelSaving = false; updateImageControls(); }
   }
   $('save-label').onclick = () => action(() => saveLabel(false));
   $('empty-scene').onclick = () => action(() => saveLabel(true));
 
   function renderTraining(job) {
+    updateImageControls();
     const phase = job.phase || 'idle';
     const busy = ['preparing', 'training', 'evaluating'].includes(phase);
     const titles = { idle: 'Ready when your images are.', preparing: 'Preparing your images…',
@@ -558,7 +634,7 @@
       $(`activity-${station}-state`).textContent = !row.activity_model_available ? 'Not available' :
         !row.config.zones[station] ? 'Zone not configured' : !row.running ? 'Camera disconnected' : labels[status.stations?.[station]] || 'Waiting';
     }
-    $('activity-export').disabled = !local || !status.summary;
+    $('activity-export').disabled = !local || !status.summary || state.reportsBusy;
     if (!trainingMode) return;
     $('behavior-collect').disabled = !row.running || busy || detectorBusy || behavior.collectBusy;
     $('behavior-collect').textContent = status.collecting ? 'Stop collecting clips' : 'Collect behavior clips';
@@ -577,7 +653,11 @@
       busy ? 'Training locally. Keep the engine running.' : 'Review clips from at least 3 independent periods, including all activities and Other examples at both stations.');
     $('behavior-epoch').textContent = job.epoch ? `Epoch ${job.epoch} / ${job.epochs}` : job.prepared ? `Preparing ${job.prepared} / ${job.total} clips` : '—';
     $('behavior-progress').style.width = `${job.phase === 'completed' ? 100 : job.phase === 'preparing' ? 10 * (job.prepared || 0) / (job.total || 1) : 10 + 85 * (job.epoch || 0) / (job.epochs || 60)}%`;
-    $('behavior-train').disabled = !local || row.running || busy || detectorBusy;
+    $('behavior-train').disabled = !local || row.running || busy || detectorBusy || !behavior.readiness?.ready || behavior.checkBusy;
+    $('behavior-check-data').disabled = !local || behavior.checkBusy;
+    $('behavior-run-requirement').textContent = row.running ? 'Disconnect the camera to enable training after the dataset checklist is complete.' :
+      busy || detectorBusy ? 'Wait for the current training job to finish.' :
+      !behavior.readiness?.ready ? 'Training is blocked by the dataset checklist above. Press Check dataset after fixing labels or periods.' : 'Camera disconnected. The dataset checklist permits training.';
     $('behavior-cancel').disabled = !busy;
     $('behavior-activate').hidden = job.phase !== 'completed';
     $('behavior-activate').disabled = row.running || busy || detectorBusy;
@@ -609,6 +689,7 @@
       behavior.clips = data.clips.map(clip => ({ ...clip, trashed: false })).sort((a, b) => a.timestamps[0] - b.timestamps[0]);
       behavior.trash = (data.trash || []).map(clip => ({ ...clip, trashed: true })).sort((a, b) => a.timestamps[0] - b.timestamps[0]);
       behavior.sessions = data.sessions;
+      if (data.readiness) renderBehaviorReadiness(data.readiness);
       const selected = $('behavior-session').value;
       $('behavior-session').replaceChildren(new Option('Choose a real recording period', ''));
       for (const session of data.sessions) $('behavior-session').add(new Option(session.name, session.id));
@@ -769,6 +850,8 @@
     if (label) { event.preventDefault(); action(() => saveBehaviorLabel(label)); }
   });
   $('behavior-train').onclick = () => action(async () => {
+    const report = await checkBehaviorData();
+    if (!report?.ready) throw new Error(report?.issues?.[0] || 'Check the behavior dataset before training.');
     await api('/api/behavior/train', { epochs: Number($('behavior-epochs').value) }); toast('Activity training started locally.');
   });
   $('behavior-cancel').onclick = () => action(async () => { await api('/api/behavior/train/cancel', {}); });

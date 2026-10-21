@@ -40,10 +40,11 @@ class BehaviorApiTests(unittest.TestCase):
     def test_normal_mode_disables_training_endpoints_even_with_valid_token(self):
         page = self.setup_server(False)
         self.assertIn(b'name="catcare-training" content="false"', page)
-        for path in ("/api/library", "/api/behavior/library", "/api/behavior/frame/anything/0"):
+        for path in ("/api/library", "/api/behavior/library", "/api/behavior/readiness", "/api/behavior/frame/anything/0"):
             self.assertEqual(self.request("GET", path)[0], 403)
         for path in ("/api/behavior/train", "/api/behavior/collect", "/api/behavior/clips/trash", "/api/behavior/clips/restore",
-                     "/api/behavior/clips/purge", "/api/train", "/api/train/bundle", "/api/sessions", "/api/performance"):
+                     "/api/behavior/clips/purge", "/api/images/trash", "/api/images/restore", "/api/images/purge",
+                     "/api/train", "/api/train/bundle", "/api/sessions", "/api/performance"):
             self.assertEqual(self.request("POST", path, {})[0], 403)
         self.assertEqual(self.request("GET", "/api/status")[0], 200)
 
@@ -102,6 +103,24 @@ class BehaviorApiTests(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertFalse(row["activity_model_available"])
         self.assertIsNone(row["behavior"]["summary"])
+
+    def test_readiness_reports_actual_labels_and_periods_without_private_paths(self):
+        self.setup_server(True)
+        self.assertEqual(self.request('GET', '/api/behavior/readiness', authenticated=False)[0], 403)
+        session = self.runtime.behavior_library.create_session('Monday breakfast')
+        clip = self.runtime.behavior_library.add_clip(session['id'], 'water', tuple(f'clip-{i}'.encode() for i in range(16)),
+            [1000 + .25 * i for i in range(16)], [0, 0, 100, 100])
+        self.runtime.behavior_library.label_clip(clip['id'], 'other')
+        code, body = self.request('GET', '/api/behavior/readiness')
+        report = json.loads(body)
+        self.assertEqual(code, 200)
+        self.assertFalse(report['ready'])
+        self.assertEqual(report['counts'], {'eating': 0, 'drinking': 0, 'other': 1})
+        self.assertEqual(report['usable_periods'], 1)
+        self.assertEqual(report['periods'][0]['name'], 'Monday breakfast')
+        self.assertNotIn(str(self.runtime.profile).encode(), body)
+        library = json.loads(self.request('GET', '/api/behavior/library')[1])
+        self.assertEqual(library['readiness']['counts'], report['counts'])
 
     def test_fast_inference_changes_size_live_without_changing_the_trained_model(self):
         self.setup_server(True)
