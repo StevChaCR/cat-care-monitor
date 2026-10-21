@@ -190,6 +190,152 @@ class ClipLibrary:
             write_json(path, row)
 
 
+def _random_behavior_split(session_ids, seed):
+    session_ids = sorted(session_ids)
+    random.Random(seed).shuffle(session_ids)
+    held = max(1, round(len(session_ids) * .15))
+    return {"test": session_ids[:held], "val": session_ids[held:2 * held],
+            "train": session_ids[2 * held:]}
+
+
+def _behavior_split_ids(groups, seed):
+    """Keep whole periods and find class coverage before rejecting a random split."""
+    original = _random_behavior_split(groups, seed)
+    requirements = ((3, 3, 3, 1, 1), (1, 1, 1, 1, 1), (1, 1, 1, 1, 1))
+    roles = ("train", "val", "test")
+    def features(items):
+        return tuple(sum(row["label"] == label and (station is None or row["station"] == station) for row in items)
+                     for label, station in (("eating", None), ("drinking", None), ("other", None),
+                                            ("other", "food"), ("other", "water")))
+    vectors = {key: features(items) for key, items in groups.items()}
+    if all(all(sum(vectors[key][f] for key in original[role]) >= need
+                   for f, need in enumerate(requirements[index])) for index, role in enumerate(roles)):
+        return original
+    support = tuple(sum(row[f] > 0 for row in vectors.values()) for f in range(5))
+    if len(groups) < 3 or any(n < 3 for n in support):
+        return original
+    order = list(groups)
+    random.Random(seed).shuffle(order)
+    order.sort(key=lambda key: -sum(1 / support[f] for f, count in enumerate(vectors[key]) if count))
+    suffix_counts = [(0,) * 5 for _ in range(len(order) + 1)]
+    suffix_support = [(0,) * 5 for _ in range(len(order) + 1)]
+    for at in range(len(order) - 1, -1, -1):
+        vector = vectors[order[at]]
+        suffix_counts[at] = tuple(suffix_counts[at + 1][f] + vector[f] for f in range(5))
+        suffix_support[at] = tuple(suffix_support[at + 1][f] + (vector[f] > 0) for f in range(5))
+    assignments = {role: [] for role in roles}
+    failed = set()
+    visited = 0
+    def find(at, deficits):
+        nonlocal visited
+        visited += 1
+        if visited > 50000:
+            return None  # Bound preparation time; unresolved splits remain blocked.
+        if not any(any(row) for row in deficits):
+            result = {role: list(values) for role, values in assignments.items()}
+            result["train"].extend(order[at:])
+            return result
+        if at == len(order):
+            return None
+        state = (at, deficits)
+        if state in failed:
+            return None
+        for f in range(5):
+            if (sum(row[f] for row in deficits) > suffix_counts[at][f] or
+                    sum(row[f] > 0 for row in deficits) > suffix_support[at][f]):
+                return None
+        key, vector = order[at], vectors[order[at]]
+        gains = [sum(min(vector[f], need[f]) / support[f] for f in range(5)) for need in deficits]
+        choices = sorted(range(3), key=lambda index: (-gains[index], index))
+        for index in choices:
+            if index == 2 and deficits[1] == deficits[2]:
+                continue  # Validation and test have identical coverage requirements.
+            if index != 0 and gains[index] == 0:
+                continue
+            changed = tuple(max(0, need - count) for need, count in zip(deficits[index], vector))
+            updated = tuple(changed if n == index else row for n, row in enumerate(deficits))
+            assignments[roles[index]].append(key)
+            found = find(at + 1, updated)
+            assignments[roles[index]].pop()
+            if found is not None:
+                return found
+        failed.add(state)
+        return None
+    return find(0, requirements) or original
+
+
+def behavior_readiness(source, seed=42, rows=None, sessions=None):
+    """Explain the current session split without loading every JPEG or training."""
+    library = ClipLibrary(source)
+    rows = library.clips() if rows is None else rows
+    sessions = library.sessions() if sessions is None else sessions
+    names = {row["id"]: row["name"] for row in sessions}
+    counts = {activity: sum(row["label"] == activity for row in rows) for activity in ACTIVITIES}
+    unreviewed = sum(row["label"] is None for row in rows)
+    excluded = sum(row["label"] == "exclude" for row in rows)
+    issues = []
+    if not rows:
+        issues.append("Collect and review behavior clips first. Cat detection photos are a separate dataset.")
+    if unreviewed:
+        issues.append(f"Review every behavior clip: {unreviewed} still need a label. Use Cannot tell or trash for unusable clips.")
+    if any(row["label"] not in (*ACTIVITIES, "exclude", None) for row in rows):
+        issues.append("An activity label is invalid. Review that clip before training.")
+    for activity, count in counts.items():
+        if count == 0:
+            detail = " Include nearby resting, sniffing, passing cats, and empty scenes at both stations." if activity == "other" else ""
+            issues.append(f"No reviewed {activity.title()} clips are available.{detail}")
+    groups = {}
+    for row in rows:
+        if row["label"] in ACTIVITIES:
+            groups.setdefault(row["session_id"], []).append(row)
+    if len(groups) < 3:
+        issues.append(f"Use at least three independent behavior recording sessions from different real periods; found {len(groups)} with usable labels. "
+                      "A period is one genuine recording occasion, such as Monday morning or Tuesday evening. Empty session names do not count.")
+    overlaps = []
+    for index, a in enumerate(sorted(groups)):
+        for b in sorted(groups)[index + 1:]:
+            a_start, a_end = min(row["timestamps"][0] for row in groups[a]), max(row["timestamps"][-1] for row in groups[a])
+            b_start, b_end = min(row["timestamps"][0] for row in groups[b]), max(row["timestamps"][-1] for row in groups[b])
+            if min(a_end, b_end) >= max(a_start, b_start):
+                overlaps.append([names.get(a, "Recording period"), names.get(b, "Recording period")])
+    if overlaps:
+        first = overlaps[0]
+        issues.append(f"Behavior sessions overlap in time: {first[0]} and {first[1]}. Keep simultaneous station clips in one real recording period.")
+    split_ids = _behavior_split_ids(groups, seed)
+    roles = {session: split for split, selected in split_ids.items() for session in selected}
+    splits = {}
+    for split in ("train", "val", "test"):
+        selected = split_ids[split]
+        items = [row for session in selected for row in groups[session]]
+        minimum = 3 if split == "train" else 1
+        split_counts = {activity: sum(row["label"] == activity for row in items) for activity in ACTIVITIES}
+        minimums = {activity: max(2, minimum) if activity == "other" else minimum for activity in ACTIVITIES}
+        negatives = {station: sum(row["label"] == "other" and row["station"] == station for row in items)
+                     for station in ("food", "water")}
+        missing = [f"{activity.title()}: {count}/{minimums[activity]}" for activity, count in split_counts.items() if count < minimums[activity]]
+        missing += [f"Other at {station}: 0/1" for station, count in negatives.items() if count == 0]
+        splits[split] = {"periods": [names.get(session, "Recording period") for session in selected],
+                         "clips": len(items), "counts": split_counts, "minimum_per_class": minimum, "minimums": minimums,
+                         "other_by_station": negatives, "missing": missing}
+        if len(groups) >= 3 and missing:
+            issues.append(f"{split.title()} split is missing " + "; ".join(missing) + ". Add those reviewed examples in its listed recording periods or collect additional independent periods.")
+    periods = []
+    for session in sessions:
+        items = [row for row in rows if row["session_id"] == session["id"]]
+        periods.append({"id": session["id"], "name": session["name"], "clips": len(items),
+                        "counts": {activity: sum(row["label"] == activity for row in items) for activity in ACTIVITIES},
+                        "unreviewed": sum(row["label"] is None for row in items),
+                        "excluded": sum(row["label"] == "exclude" for row in items),
+                        "split": roles.get(session["id"]),
+                        "start": min((row["timestamps"][0] for row in items), default=None),
+                        "end": max((row["timestamps"][-1] for row in items), default=None)})
+    return {"ready": not issues, "integrity_checked": False,
+            "split_strategy": "session_shuffle" if split_ids == _random_behavior_split(groups, seed) else "class_coverage_by_period",
+            "clips": len(rows), "counts": counts,
+            "unreviewed": unreviewed, "excluded": excluded, "usable_periods": len(groups),
+            "periods": periods, "splits": splits, "issues": issues}
+
+
 def prepare_behavior_dataset(source, output, seed=42):
     """Keep whole recording periods together, with all classes in every split."""
     library = ClipLibrary(source)
@@ -214,10 +360,7 @@ def prepare_behavior_dataset(source, output, seed=42):
     if len(groups) < 3:
         raise ValueError("Use at least three independent behavior recording sessions from different real periods.")
     session_ids = sorted(groups)
-    random.Random(seed).shuffle(session_ids)
-    held = max(1, round(len(session_ids) * .15))
-    split_ids = {"test": session_ids[:held], "val": session_ids[held:2 * held],
-                 "train": session_ids[2 * held:]}
+    split_ids = _behavior_split_ids(groups, seed)
     # Split overlapping source time ranges together rather than pretending a
     # reconnection or session-name change made the same footage independent.
     for a_index, a in enumerate(session_ids):

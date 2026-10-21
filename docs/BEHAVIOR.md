@@ -23,7 +23,31 @@ The laboratory flag is a product separation, not an account-authentication syste
 3. Open **Behavior lab** and create a session for one real recording period, for example `Camera A - Monday evening`. Connect the camera and enable clip collection. This is explicitly opt-in.
 4. Choose **Collection area → Water only**, **Food only**, or **Both configured stations**, then press **Collect behavior clips**. Stop collection before switching areas. Reuse the same session when switching areas during the same real recording period. Each stored sequence contains 16 JPEG frames sampled near 4 FPS, cropped around the selected station with context. Stations are sampled independently of YOLO, so missed cats, resting animals, and empty scenes can be reviewed too. No audio or RTSP credentials are stored. Collection is limited to 120 clips per camera run and 600 active clips per profile.
 5. Review each clip as a sequence. Use **E** for eating, **D** for drinking, **O** for other activity, or **X** for cannot tell. Other must include sniffing, sitting, lying beside the bowl, grooming, walking past, and empty scenes. Exclude occlusions, multiple cats, transitions between activities, or ambiguous clips rather than guessing a label.
-6. Use independent real periods for training, validation, and testing. A new session name or a reconnection does not make adjacent footage independent. The helper rejects overlapping source time ranges and duplicate clips. Each split must contain all three activities and Other examples from both stations. At least three examples of each class are required in training and one per class in validation and test; these are software minimums, not an adequate-data guarantee.
+6. Use independent real periods for training, validation, and testing. A new session name or a reconnection does not make adjacent footage independent. The helper rejects overlapping source time ranges and duplicate clips. Each split must contain all three activities and Other examples from both stations. At least three examples of each class are required in training and one per class in validation and test; these are software minimums, not an adequate-data guarantee. An individual period can contain a single activity; the split planner can combine multiple complete periods to meet coverage. It keeps the initial session assignment when valid and searches for a class-balanced whole-period assignment when needed. It never splits one period between sets to meet a count.
+
+## Why three periods, and why 14 / 7 / 7 may still be blocked
+
+A **recording period** is one genuine recording occasion, for example Monday breakfast, Tuesday evening, and Wednesday morning. Occasions on the same day can also be distinct. There is no universal waiting interval that guarantees independence, and three different days are not mandatory. Keep neighboring frames, one continuous event, and simultaneous food/water recordings in the same session. Empty session names, copied clips, or reconnecting during the same event do not create new independent evidence.
+
+This program requires at least three usable periods because it reserves separate groups for **training**, **validation** (model selection), and **test** (held-out evaluation). It is an application rule, not a requirement imposed by YOLO. Mixing nearly identical neighboring frames across these groups can overstate performance. The grouping remains by recording occasion, not an automatic guarantee of generalization across cats or homes.
+
+The current software minimums are:
+
+| Set | Eating | Drinking | Other | Other station coverage |
+| --- | --- | --- | --- | --- |
+| Training | 3 | 3 | 3 | At least one food and one water clip |
+| Validation | 1 | 1 | 2 | At least one food and one water clip |
+| Test | 1 | 1 | 2 | At least one food and one water clip |
+
+Validation and test each need two Other clips because one clip belongs to a single station. Thus **14 Eating, 7 Drinking, and 7 Other** satisfy the global numeric minimums, while training can still be blocked if the clips are all in one period, the seven Other clips cover only water, some clips remain unreviewed, periods overlap, or complete periods cannot be assigned to cover every set. These are the program's preparation thresholds, not an accuracy guarantee.
+
+Open **Behavior lab → Dataset checklist** and press **Check dataset**. The panel shows total class counts, unreviewed clips, usable periods, proposed membership, missing counts, and Other coverage at food/water in each set. Expand **What are recording periods?** to see session names and captured time ranges. Empty sessions do not count as usable periods. Labels are counted from the reviewed activity, never inferred from the collection area.
+
+When the initial random partition fails but a valid whole-period partition exists, preparation now tries to find that partition before rejecting the data. The search is bounded to keep the lab responsive. The proposed partition can change as active clips and periods change; reserve a separate independent final-release evaluation corpus outside development tuning. Frame integrity and exact duplicates are checked again when preparing the real training data.
+
+Stop clip collection and **disconnect the camera** before training; a connected camera also disables the training button. If dataset preparation passes but the training process fails, its progress message and private `training.log` identify a separate dependency, encoder-download, or memory problem.
+
+Reference: [scikit-learn on grouped and time-dependent evaluation](https://scikit-learn.org/stable/modules/cross_validation.html).
 
 ## Collect a specific station
 

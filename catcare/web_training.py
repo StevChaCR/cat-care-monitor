@@ -90,12 +90,15 @@ class TrainingJob:
 
 class BehaviorTrainingJob(TrainingJob):
     def start(self, profile, images, epochs, device):
-        from .behavior_data import prepare_behavior_dataset
+        from .behavior_data import behavior_readiness, prepare_behavior_dataset
         with self.lock:
             if self.busy():
                 raise ValueError("Behavior training is already running.")
             if type(epochs) is not int or not 5 <= epochs <= 200:
                 raise ValueError("Choose between 5 and 200 training epochs.")
+            checklist = behavior_readiness(images)
+            if not checklist["ready"]:
+                raise ValueError(checklist["issues"][0] + " See the Behavior lab dataset checklist for all blockers.")
             folder = Path(profile) / "behavior" / "training" / uuid.uuid4().hex
             prepare_behavior_dataset(images, folder / "dataset.json")
             self.folder, self.weights, self.phase = folder, None, "preparing"

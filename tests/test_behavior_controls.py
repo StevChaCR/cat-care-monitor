@@ -2,7 +2,6 @@
 import json
 import tempfile
 import unittest
-from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -98,16 +97,16 @@ class BehaviorCollectionControlsTests(unittest.TestCase):
             import cv2
         except ImportError:
             self.skipTest("OpenCV and NumPy are needed for simulated station capture.")
-        with tempfile.TemporaryDirectory() as folder, ExitStack() as cleanup:
+        with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             library = ClipLibrary(root / "sessions")
             session = library.create_session("One real period")
             store = Store(root / "events.sqlite3")
-            cleanup.callback(store.close)
+            self.addCleanup(store.close)
             config = {**DEFAULTS, "zones": {"food": [.05, .05, .4, .4], "water": [.6, .6, .95, .95]}}
             service = BehaviorService(config, library, store, None, root, "cpu")
             service.worker = MagicMock()
-            cleanup.callback(service.stop)
+            self.addCleanup(service.stop)
             frame = np.zeros((200, 300, 3), np.uint8)
             for index in range(16):
                 stamp = 1000 + index * .25
@@ -122,15 +121,15 @@ class BehaviorCollectionControlsTests(unittest.TestCase):
             import cv2
         except ImportError:
             self.skipTest("OpenCV and NumPy are needed for simulated station capture.")
-        with tempfile.TemporaryDirectory() as folder, ExitStack() as cleanup:
+        with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             library = ClipLibrary(root / "sessions")
             session = library.create_session("One recording period")
             store = Store(root / "events.sqlite3")
-            cleanup.callback(store.close)
+            self.addCleanup(store.close)
             config = {**DEFAULTS, "zones": {"food": [.05, .05, .4, .4], "water": [.6, .6, .95, .95]}}
             service = BehaviorService(config, library, store, None, root, "cpu")
-            cleanup.callback(service.stop)
+            self.addCleanup(service.stop)
             frame = np.zeros((200, 300, 3), np.uint8)
             def observe(index, station, generation):
                 frame[:, :, 0] = index
